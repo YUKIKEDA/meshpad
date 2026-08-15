@@ -304,24 +304,27 @@ impl eframe::App for MeshpadApp {
                     }
                 }
 
+                let dropping = hover_dropping(ctx);
                 if self.scene.is_none() {
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Drop a file, or File -> Open",
-                        egui::FontId::proportional(16.0),
-                        Color32::from_gray(130),
-                    );
-                } else {
+                    if !dropping {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Drop a file, or File -> Open",
+                            egui::FontId::proportional(16.0),
+                            Color32::from_gray(130),
+                        );
+                    }
+                } else if !dropping {
                     let (view, _, _) = self.camera.view_proj(aspect);
                     view_cube::paint(ui, rect, view);
                 }
 
-                if hover_dropping(ctx) {
+                if dropping {
                     ui.painter().rect_filled(
                         rect,
                         0.0,
-                        Color32::from_rgba_unmultiplied(40, 80, 140, 50),
+                        Color32::from_rgba_unmultiplied(20, 40, 70, 180),
                     );
                     ui.painter().text(
                         rect.center(),
