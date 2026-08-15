@@ -9,7 +9,7 @@ use glam::Vec3;
 use rayon::prelude::*;
 
 use crate::camera::Camera;
-use crate::stl::TriangleSoup;
+use crate::mesh::TriangleSoup;
 
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
