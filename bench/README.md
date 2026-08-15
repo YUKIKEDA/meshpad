@@ -45,7 +45,7 @@ ASCII NAS は同じ幾何でも STL の数倍〜十数倍のバイトになる�
 - lucy → 約 **1.40 GB STL**（数 GB 帯の下限。別途スキャンデータを探す必要はない）
 - 中間の数百 MB STL は **happy を 1 回細分**（約 435 万三角形 → 約 **217 MB**）で埋める
 
-ASCII STL は bunny/happy だけで足りる。lucy の ASCII STL は数 GB のテキストになり、1.0 では作らない。
+ASCII STL は bunny/happy だけで足りる。`happy_subdiv1` と lucy の ASCII は数百 MB〜数 GB のテキストになるので 1.0 では作らない。
 
 ## ラダー（生成物）
 
@@ -53,15 +53,17 @@ ASCII STL は bunny/happy だけで足りる。lucy の ASCII STL は数 GB の�
 
 ### STL（パーサ・C-lite）
 
-| 段       | 生成物                  | 三角形（目安） | バイナリ STL | 何を見るか                               |
-| -------- | ----------------------- | -------------- | ------------ | ---------------------------------------- |
-| smoke    | `stl/bunny_res3.stl`    | 4k             | <1 MB        | 起動・回帰                               |
-| small    | `stl/bunny.stl`         | 69k            | ~3.5 MB      | チャンク 1 個の日常                      |
-| medium   | `stl/happy_res2.stl`    | 293k           | ~15 MB       | 同上                                     |
-| large    | `stl/happy.stl`         | 1.09M          | ~54 MB       | 200 万上限より下。全載せ経路             |
-| heavy    | `stl/happy_subdiv1.stl` | ~4.4M          | ~220 MB      | 上限超過・C-lite 前半                    |
-| huge     | `stl/lucy.stl`          | 28.1M          | ~1.40 GB     | 初回走査中操作、TEMP、近景 200 万        |
-| optional | `--tile 2,1,1` on lucy  | 56M            | ~2.8 GB      | 数 GB 上限。ディスクに余裕があるときだけ |
+バイナリは `stl/`。ASCII は同じ幾何を `stl_ascii/` に置く（フォルダドロップで混ざらないように分ける）。
+
+| 段       | 生成物                  | 三角形（目安） | バイナリ       | ASCII                | 何を見るか                               |
+| -------- | ----------------------- | -------------- | -------------- | -------------------- | ---------------------------------------- |
+| smoke    | `bunny_res3.stl`        | 4k             | `stl/` <1 MB   | `stl_ascii/` ~0.7 MB | 起動・回帰、ASCII パーサ                 |
+| small    | `bunny.stl`             | 69k            | `stl/` ~3.5 MB | `stl_ascii/` ~13 MB  | チャンク 1 個の日常                      |
+| medium   | `happy_res2.stl`        | 293k           | `stl/` ~15 MB  | `stl_ascii/` ~56 MB  | 同上                                     |
+| large    | `happy.stl`             | 1.09M          | `stl/` ~54 MB  | `stl_ascii/` ~207 MB | 全載せ経路。ASCII の上限付近             |
+| heavy    | `stl/happy_subdiv1.stl` | ~4.4M          | ~220 MB        | 作らない             | 上限超過・C-lite 前半                    |
+| huge     | `stl/lucy.stl`          | 28.1M          | ~1.40 GB       | 作らない             | 初回走査中操作、TEMP、近景 200 万        |
+| optional | `--tile 2,1,1` on lucy  | 56M            | ~2.8 GB        | 作らない             | 数 GB 上限。ディスクに余裕があるときだけ |
 
 ### NAS は 2 系統（混ぜて評価しない）
 
@@ -100,6 +102,7 @@ bench\.venv\Scripts\python -m pip install -r bench/requirements.txt
 
 bench\.venv\Scripts\python bench/scripts/prepare_ladder.py --nas-only
 bench\.venv\Scripts\python bench/scripts/prepare_ladder.py --stl-only --tier all
+bench\.venv\Scripts\python bench/scripts/prepare_ladder.py --ascii-only
 ```
 
 PLY が無いとき: 上の Stanford のページから `bunny` / `happy_recon` / `lucy` を `bench/data/<name>/` に置く。
@@ -107,7 +110,7 @@ PLY が無いとき: 上の Stanford のページから `bunny` / `happy_recon` 
 ## 複数ファイル
 
 組み立て確認用: derived の STL をそのまま複数渡せばよい（ワールド座標のまま結合）。
-フォルダ直下ドロップの確認は `derived/stl/` を使う。再帰は 1.0 に無いのでサブフォルダを切らない。
+フォルダ直下ドロップの確認は `derived/stl/`（バイナリ）または `derived/stl_ascii/` を使う。再帰は 1.0 に無いのでサブフォルダを切らない。混ぜると ASCII とバイナリが同じシーンになる。
 
 ## git
 

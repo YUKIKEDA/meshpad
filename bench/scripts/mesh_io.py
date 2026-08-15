@@ -236,16 +236,13 @@ def _subdivide_once(mesh: Mesh) -> Mesh:
     return Mesh(xs, ys, zs, new_idx)
 
 
-def write_stl_binary(
-    path: Path,
+def _copies_and_pitch(
     mesh: Mesh,
-    *,
-    copies: tuple[int, int, int] = (1, 1, 1),
-    pitch: tuple[float, float, float] | None = None,
-) -> int:
+    copies: tuple[int, int, int],
+    pitch: tuple[float, float, float] | None,
+) -> tuple[int, int, int, int, tuple[float, float, float]]:
     nx, ny, nz = copies
-    ncopy = nx * ny * nz
-    ntri = mesh.nfaces * ncopy
+    ntri = mesh.nfaces * nx * ny * nz
     if pitch is None:
         span = (
             (max(mesh.xs) - min(mesh.xs)) if mesh.nverts else 1.0,
@@ -253,6 +250,17 @@ def write_stl_binary(
             (max(mesh.zs) - min(mesh.zs)) if mesh.nverts else 1.0,
         )
         pitch = (span[0] * 1.05 or 1.0, span[1] * 1.05 or 1.0, span[2] * 1.05 or 1.0)
+    return nx, ny, nz, ntri, pitch
+
+
+def write_stl_binary(
+    path: Path,
+    mesh: Mesh,
+    *,
+    copies: tuple[int, int, int] = (1, 1, 1),
+    pitch: tuple[float, float, float] | None = None,
+) -> int:
+    nx, ny, nz, ntri, pitch = _copies_and_pitch(mesh, copies, pitch)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
         header = b"meshpad bench stl".ljust(80, b"\0")
@@ -283,4 +291,42 @@ def write_stl_binary(
                                 0,
                             )
                         )
+    return ntri
+
+
+def write_stl_ascii(
+    path: Path,
+    mesh: Mesh,
+    *,
+    copies: tuple[int, int, int] = (1, 1, 1),
+    pitch: tuple[float, float, float] | None = None,
+) -> int:
+    nx, ny, nz, ntri, pitch = _copies_and_pitch(mesh, copies, pitch)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    name = path.stem.encode("ascii", "replace").decode("ascii") or "mesh"
+    it = mesh.indices
+    px, py, pz = pitch
+    buf: list[str] = []
+    with path.open("w", encoding="ascii", newline="\n") as f:
+        f.write(f"solid {name}\n")
+        for iz in range(nz):
+            for iy in range(ny):
+                for ix in range(nx):
+                    dx, dy, dz = ix * px, iy * py, iz * pz
+                    for i in range(0, len(it), 3):
+                        a, b, c = it[i], it[i + 1], it[i + 2]
+                        buf.append("  facet normal 0 0 0\n")
+                        buf.append("    outer loop\n")
+                        for idx in (a, b, c):
+                            buf.append(
+                                f"      vertex {mesh.xs[idx] + dx:.8g} {mesh.ys[idx] + dy:.8g} {mesh.zs[idx] + dz:.8g}\n"
+                            )
+                        buf.append("    endloop\n")
+                        buf.append("  endfacet\n")
+                        if len(buf) >= 4096:
+                            f.writelines(buf)
+                            buf.clear()
+        if buf:
+            f.writelines(buf)
+        f.write(f"endsolid {name}\n")
     return ntri
