@@ -15,9 +15,11 @@
 
 use std::path::PathBuf;
 
+use eframe::egui;
 use eframe::egui_wgpu::wgpu::{Backends, InstanceDescriptor};
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
 use meshpad::app::MeshpadApp;
+use meshpad::icon;
 
 fn main() -> eframe::Result<()> {
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
@@ -36,7 +38,11 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([640.0, 400.0])
             .with_title("Meshpad")
+            .with_decorations(false)
+            .with_resizable(true)
+            .with_icon(icon::viewport_icon())
             .with_drag_and_drop(true),
         wgpu_options,
         depth_buffer: 0,

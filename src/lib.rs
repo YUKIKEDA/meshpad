@@ -5,6 +5,7 @@
 pub mod app;
 pub mod camera;
 pub mod gpu;
+pub mod icon;
 pub mod load;
 pub mod mesh;
 pub(crate) mod nas;
