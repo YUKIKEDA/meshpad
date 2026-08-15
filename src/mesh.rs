@@ -25,6 +25,7 @@ impl TriangleSoup {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct ParsedMesh {
     pub positions: Vec<[f32; 3]>,
     pub min: Vec3,

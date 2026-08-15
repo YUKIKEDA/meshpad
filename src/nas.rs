@@ -38,7 +38,7 @@ pub(crate) fn load_nas(path: &Path) -> Result<(ParsedMesh, Vec<String>)> {
 ///
 /// # Errors
 ///
-/// 外皮三角形が 1 枚も無いとき。
+/// 外皮三角形が 1 枚も無いとき。診断（`cp != 0`、未知カードなど）があればエラー文に含める。
 pub(crate) fn parse_nas(bytes: &[u8]) -> Result<(ParsedMesh, Vec<String>)> {
     let cards = logical_cards(bytes);
     let parsed: Vec<ParsedCard> = if cards.len() >= PAR_CARDS {
@@ -364,7 +364,10 @@ fn assemble(cards: Vec<ParsedCard>) -> Result<(ParsedMesh, Vec<String>)> {
         warnings.push(format!("unknown cards: {detail}"));
     }
     if mesh.positions.is_empty() {
-        bail!("NAS has no surface triangles");
+        if warnings.is_empty() {
+            bail!("NAS has no surface triangles");
+        }
+        bail!("NAS has no surface triangles ({})", warnings.join("; "));
     }
     Ok((mesh, warnings))
 }
@@ -527,6 +530,17 @@ CORD2R         1\n";
         assert_eq!(mesh.positions.len(), 3);
         assert!(warnings.iter().any(|w| w.contains("cp")));
         assert!(warnings.iter().any(|w| w.contains("CORD2R")));
+    }
+
+    #[test]
+    fn empty_skin_keeps_diagnostic_warnings() {
+        let src = "\
+GRID           1       2      0.      0.      0.\n\
+CORD2R         1\n";
+        let err = parse_nas(src.as_bytes()).unwrap_err().to_string();
+        assert!(err.contains("no surface triangles"));
+        assert!(err.contains("cp != 0"));
+        assert!(err.contains("CORD2R"));
     }
 
     #[test]
