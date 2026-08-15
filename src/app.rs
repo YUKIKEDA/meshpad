@@ -18,6 +18,8 @@ pub struct MeshpadApp {
     renderer: Renderer,
     scene: Option<SceneGpu>,
     camera: Camera,
+    /// 次フレームの実ビューポートで [`Camera::fit`] する半径。
+    pending_fit: Option<f32>,
     status: String,
     warnings: Vec<String>,
     title_file: Option<String>,
@@ -46,6 +48,7 @@ impl MeshpadApp {
             renderer,
             scene: None,
             camera: Camera::default(),
+            pending_fit: None,
             status: String::new(),
             warnings: Vec::new(),
             title_file: None,
@@ -61,12 +64,13 @@ impl MeshpadApp {
             Ok((soup, warnings)) => {
                 self.warnings = warnings;
                 self.scene = Some(SceneGpu::from_soup(device, &soup));
-                self.camera.fit(soup.radius, 16.0 / 9.0);
+                self.pending_fit = Some(soup.radius);
                 self.title_file = paths.first().map(|p| file_label(p, paths.len()));
                 self.status = format!("{} triangles", soup.triangle_count());
             }
             Err(e) => {
                 self.scene = None;
+                self.pending_fit = None;
                 self.warnings.clear();
                 self.title_file = None;
                 self.status = e.to_string();
@@ -122,6 +126,9 @@ impl eframe::App for MeshpadApp {
                 let avail = ui.available_size();
                 let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
                 let aspect = (rect.width() / rect.height().max(1.0)).max(0.05);
+                if let Some(radius) = self.pending_fit.take() {
+                    self.camera.fit(radius, aspect);
+                }
                 if self.scene.is_some() {
                     self.camera.distance = (self.camera.distance).max(self.scene.as_ref().unwrap().radius * 3.0);
                 }

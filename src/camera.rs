@@ -40,20 +40,23 @@ impl Default for Camera {
 impl Camera {
     /// 原点中心の球が画面に収まるよう注視点・距離・ハーフサイズを入れ直す。
     ///
-    /// `aspect` は幅 / 高さ。横長なら縦方向の半径、縦長なら縦を基準に拡げる。
+    /// `aspect` は幅 / 高さ。直交投影の横ハーフサイズは `half_height * aspect` なので、
+    /// 縦長（`aspect < 1`）では `half_height` を広げて横方向も半径＋余白が収まるようにする。
+    /// 呼び出し側は 16:9 などの決め打ちではなく、描画に使うビューポートの実アスペクトを渡す。
     ///
     /// # Examples
     ///
     /// ```ignore
     /// let mut cam = Camera::default();
-    /// cam.fit(1.0, 16.0 / 9.0);
-    /// assert!(cam.target.length() < 1e-5);
+    /// cam.fit(1.0, 0.5);
+    /// assert!(cam.half_height > 1.15);
     /// ```
     pub fn fit(&mut self, radius: f32, aspect: f32) {
         self.target = Vec3::ZERO;
         self.distance = (radius * 3.0).max(1e-3);
         let half = radius * 1.15;
-        self.half_height = if aspect > 1.0 { half } else { half / aspect.max(1e-4) };
+        let aspect = aspect.max(1e-4);
+        self.half_height = half.max(half / aspect);
     }
 
     /// 画面ピクセルのドラッグ量で方位と仰角を更新する。
@@ -149,5 +152,36 @@ impl Camera {
         let half_h = self.half_height;
         let half_w = half_h * aspect.max(1e-4);
         self.target + right * (ndc.x * half_w) + up * (ndc.y * half_h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn covers_radius(cam: &Camera, radius: f32, aspect: f32) -> bool {
+        let pad = radius * 1.15;
+        let half_h = cam.half_height;
+        let half_w = half_h * aspect;
+        half_h + 1e-5 >= pad && half_w + 1e-5 >= pad
+    }
+
+    #[test]
+    fn fit_landscape_uses_vertical_extent() {
+        let mut cam = Camera::default();
+        let aspect = 16.0 / 9.0;
+        cam.fit(10.0, aspect);
+        assert!((cam.half_height - 11.5).abs() < 1e-5);
+        assert!(covers_radius(&cam, 10.0, aspect));
+    }
+
+    #[test]
+    fn fit_portrait_enlarges_half_height() {
+        let mut cam = Camera::default();
+        let aspect = 0.5;
+        cam.fit(10.0, aspect);
+        assert!(cam.half_height > 11.5);
+        assert!((cam.half_height * aspect - 11.5).abs() < 1e-5);
+        assert!(covers_radius(&cam, 10.0, aspect));
     }
 }
