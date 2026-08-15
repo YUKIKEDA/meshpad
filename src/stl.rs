@@ -1,25 +1,29 @@
 //! STL を三角形スープへ展開する。
 //!
 //! バイナリと ASCII を判別する。`mmap` は読み取りにだけ使い、バイナリの 50 バイトレコードを
-//! GPU 頂点へ直接再解釈しない。法線はファイル値を捨て、描画時に面から復元する。
+//! GPU 頂点へ直接再解釈しない。大きいバイナリは展開と AABB を Rayon で分割する。
+//! ASCII の数値は `fast-float2` の部分パース。法線はファイル値を捨て、描画時に面から復元する。
 
-use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use glam::Vec3;
 use memmap2::Mmap;
+use rayon::prelude::*;
 
 const HEADER: usize = 80;
 const RECORD: usize = 50;
+/// これ以上の三角形は展開と AABB を Rayon で分割する。
+const PAR_TRIANGLES: usize = 250_000;
+const PAR_TRI_CHUNK: usize = 16_384;
 
 /// GPU へ渡す前の三角形スープ。
 ///
 /// 位置だけを持つ。隣接頂点は共有せず、法線はシェーダ側で面ごとに出す。
-/// `positions` はファイル座標から [`Self::origin`] を引いた値。
+/// `positions` はファイル座標のまま。[`Self::origin`] は AABB 中心。GPU へ載せるときに引く。
 #[derive(Debug, Clone)]
 pub struct TriangleSoup {
-    /// 3 頂点で 1 三角形。描画空間（AABB 中心が原点）。
+    /// 3 頂点で 1 三角形。ファイル座標（中心化しない）。
     pub positions: Vec<[f32; 3]>,
     /// 元ファイル空間での AABB 中心。
     pub origin: Vec3,
@@ -44,7 +48,7 @@ impl TriangleSoup {
 
 /// 複数の STL（バイナリまたは ASCII）をワールド座標のまま結合する。
 ///
-/// 読めたファイルの頂点を連結したあと、全体 AABB で再中心化する。
+/// 読めたファイルの頂点をファイル座標のまま連結し、全体 AABB の中心を [`TriangleSoup::origin`] に残す。
 /// 失敗したパスは捨てず、警告文字列のベクタに残す。
 ///
 /// # Errors
@@ -59,11 +63,23 @@ impl TriangleSoup {
 /// ```
 pub fn load_paths(paths: &[impl AsRef<Path>]) -> Result<(TriangleSoup, Vec<String>)> {
     let mut all = Vec::new();
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
     let mut warnings = Vec::new();
     for p in paths {
         let p = p.as_ref();
-        match load_stl(p) {
-            Ok(pos) => all.extend(pos),
+        match load_parsed(p) {
+            Ok(mesh) => {
+                if all.is_empty() {
+                    min = mesh.min;
+                    max = mesh.max;
+                    all = mesh.positions;
+                } else {
+                    min = min.min(mesh.min);
+                    max = max.max(mesh.max);
+                    all.extend(mesh.positions);
+                }
+            }
             Err(e) => warnings.push(format!("{}: {e}", p.display())),
         }
     }
@@ -75,7 +91,7 @@ pub fn load_paths(paths: &[impl AsRef<Path>]) -> Result<(TriangleSoup, Vec<Strin
         };
         bail!("{detail}");
     }
-    Ok((recenter(all), warnings))
+    Ok((bounds_to_soup(all, min, max), warnings))
 }
 
 /// 1 ファイルを mmap して STL として読む。
@@ -87,9 +103,13 @@ pub fn load_paths(paths: &[impl AsRef<Path>]) -> Result<(TriangleSoup, Vec<Strin
 ///
 /// 開けない、マップできない、または [`parse_stl`] が失敗したとき。
 pub fn load_stl(path: &Path) -> Result<Vec<[f32; 3]>> {
+    Ok(load_parsed(path)?.positions)
+}
+
+fn load_parsed(path: &Path) -> Result<ParsedMesh> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }.with_context(|| format!("mmap {}", path.display()))?;
-    parse_stl(&mmap)
+    parse_parsed(&mmap)
 }
 
 /// バイト列を STL として解釈する。
@@ -108,11 +128,21 @@ pub fn load_stl(path: &Path) -> Result<Vec<[f32; 3]>> {
 /// assert_eq!(positions.len() % 3, 0);
 /// ```
 pub fn parse_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
+    Ok(parse_parsed(bytes)?.positions)
+}
+
+fn parse_parsed(bytes: &[u8]) -> Result<ParsedMesh> {
     if looks_like_ascii(bytes) && !binary_size_matches(bytes) {
-        parse_ascii_stl(bytes)
+        parse_ascii_mesh(bytes)
     } else {
-        parse_binary_stl(bytes)
+        parse_binary_mesh(bytes)
     }
+}
+
+struct ParsedMesh {
+    positions: Vec<[f32; 3]>,
+    min: Vec3,
+    max: Vec3,
 }
 
 /// バイト列をバイナリ STL として解釈する。
@@ -130,6 +160,10 @@ pub fn parse_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
 /// assert_eq!(positions.len() % 3, 0);
 /// ```
 pub fn parse_binary_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
+    Ok(parse_binary_mesh(bytes)?.positions)
+}
+
+fn parse_binary_mesh(bytes: &[u8]) -> Result<ParsedMesh> {
     if bytes.len() < HEADER + 4 {
         bail!("STL too small");
     }
@@ -138,28 +172,70 @@ pub fn parse_binary_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
     if bytes.len() < need {
         bail!("truncated STL: need {need} bytes, have {}", bytes.len());
     }
-    let mut positions = Vec::with_capacity(count.saturating_mul(3));
+    if count == 0 {
+        bail!("STL has zero triangles");
+    }
     let recs = &bytes[HEADER + 4..need];
-    for rec in recs.chunks_exact(RECORD) {
+    let nvert = count * 3;
+    let mut positions = Vec::with_capacity(nvert);
+    // SAFETY: `unpack_tris` が全要素を書く。`[f32; 3]` は drop しない。
+    unsafe {
+        positions.set_len(nvert);
+    }
+    let (min, max) = if count >= PAR_TRIANGLES {
+        unpack_tris_par(recs, &mut positions)
+    } else {
+        unpack_tris(recs, &mut positions)
+    };
+    Ok(ParsedMesh {
+        positions,
+        min,
+        max,
+    })
+}
+
+fn unpack_tris(recs: &[u8], out: &mut [[f32; 3]]) -> (Vec3, Vec3) {
+    debug_assert_eq!(recs.len() / RECORD, out.len() / 3);
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for (i, rec) in recs.chunks_exact(RECORD).enumerate() {
         for v in 0..3 {
             let o = 12 + v * 12;
             let x = f32::from_le_bytes(rec[o..o + 4].try_into().unwrap());
             let y = f32::from_le_bytes(rec[o + 4..o + 8].try_into().unwrap());
             let z = f32::from_le_bytes(rec[o + 8..o + 12].try_into().unwrap());
-            positions.push([x, y, z]);
+            let t = Vec3::new(x, y, z);
+            min = min.min(t);
+            max = max.max(t);
+            out[i * 3 + v] = [x, y, z];
         }
     }
-    if positions.is_empty() {
-        bail!("STL has zero triangles");
+    (min, max)
+}
+
+fn unpack_tris_par(recs: &[u8], out: &mut [[f32; 3]]) -> (Vec3, Vec3) {
+    let rec_stride = RECORD * PAR_TRI_CHUNK;
+    let vert_stride = 3 * PAR_TRI_CHUNK;
+    let bounds: Vec<(Vec3, Vec3)> = recs
+        .par_chunks(rec_stride)
+        .zip(out.par_chunks_mut(vert_stride))
+        .map(|(rec_chunk, vert_chunk)| unpack_tris(rec_chunk, vert_chunk))
+        .collect();
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for (a, b) in bounds {
+        min = min.min(a);
+        max = max.max(b);
     }
-    Ok(positions)
+    (min, max)
 }
 
 /// バイト列を ASCII STL として解釈する。
 ///
 /// `facet` / `vertex` / `endfacet` を行単位で読む。キーワードは大文字小文字を問わない。
 /// ファイル内の法線は捨て、`vertex` の座標だけを取る。頂点が 3 つ揃わない facet は飛ばす。
-/// UTF-8 でなければ Latin-1 として読む。先頭の UTF-8 BOM は無視する。
+/// 先頭の UTF-8 BOM は無視する。UTF-8 なら行分割だけ `str::lines`、数値は `fast-float2` の部分パース。
+/// 非 UTF-8 は行をバイト走査する。
 ///
 /// # Errors
 ///
@@ -172,56 +248,144 @@ pub fn parse_binary_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
 /// assert_eq!(positions.len(), 3);
 /// ```
 pub fn parse_ascii_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
-    let text = ascii_stl_text(bytes);
-    let mut positions = Vec::new();
-    let mut verts: Vec<[f32; 3]> = Vec::with_capacity(3);
-
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut tokens = line.split_ascii_whitespace();
-        let Some(kw) = tokens.next() else {
-            continue;
-        };
-        if kw.eq_ignore_ascii_case("facet") {
-            verts.clear();
-        } else if kw.eq_ignore_ascii_case("vertex") {
-            if let Some(v) = parse_xyz(tokens) {
-                verts.push(v);
-            } else {
-                verts.clear();
-            }
-        } else if kw.eq_ignore_ascii_case("endfacet") {
-            if verts.len() == 3 {
-                positions.extend_from_slice(&verts);
-            }
-            verts.clear();
-        }
-    }
-    if verts.len() == 3 {
-        positions.extend_from_slice(&verts);
-    }
-    if positions.is_empty() {
-        bail!("STL has zero triangles");
-    }
-    Ok(positions)
+    Ok(parse_ascii_mesh(bytes)?.positions)
 }
 
-fn ascii_stl_text(bytes: &[u8]) -> Cow<'_, str> {
+fn parse_ascii_mesh(bytes: &[u8]) -> Result<ParsedMesh> {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
-        Ok(s) => Cow::Borrowed(s),
-        Err(_) => Cow::Owned(bytes.iter().map(|&b| b as char).collect()),
+        Ok(text) => parse_ascii_text(text, bytes.len()),
+        Err(_) => parse_ascii_bytes(bytes),
     }
 }
 
-fn parse_xyz<'a>(mut it: impl Iterator<Item = &'a str>) -> Option<[f32; 3]> {
-    let x = it.next()?.parse().ok()?;
-    let y = it.next()?.parse().ok()?;
-    let z = it.next()?.parse().ok()?;
+fn parse_ascii_text(text: &str, nbytes: usize) -> Result<ParsedMesh> {
+    let mut acc = AsciiAcc::new(nbytes);
+    for raw in text.lines() {
+        let line = trim_ascii(raw.as_bytes());
+        if !line.is_empty() {
+            acc.ingest(line);
+        }
+    }
+    acc.finish()
+}
+
+fn parse_ascii_bytes(bytes: &[u8]) -> Result<ParsedMesh> {
+    let mut acc = AsciiAcc::new(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'\n' {
+            i += 1;
+        }
+        let mut line = &bytes[start..i];
+        if i < bytes.len() {
+            i += 1;
+        }
+        if line.last() == Some(&b'\r') {
+            line = &line[..line.len() - 1];
+        }
+        line = trim_ascii(line);
+        if !line.is_empty() {
+            acc.ingest(line);
+        }
+    }
+    acc.finish()
+}
+
+struct AsciiAcc {
+    positions: Vec<[f32; 3]>,
+    min: Vec3,
+    max: Vec3,
+    facet: [[f32; 3]; 3],
+    nvert: u8,
+}
+
+impl AsciiAcc {
+    fn new(nbytes: usize) -> Self {
+        Self {
+            positions: Vec::with_capacity((nbytes / 60).max(3)),
+            min: Vec3::splat(f32::MAX),
+            max: Vec3::splat(f32::MIN),
+            facet: [[0f32; 3]; 3],
+            nvert: 0,
+        }
+    }
+
+    fn ingest(&mut self, line: &[u8]) {
+        if keyword_at(line, b"vertex") {
+            match parse_xyz_bytes(skip_ascii_ws(&line[6..])) {
+                Some(v) if self.nvert < 3 => {
+                    self.facet[self.nvert as usize] = v;
+                    self.nvert += 1;
+                }
+                _ => self.nvert = 0,
+            }
+        } else if keyword_at(line, b"facet") {
+            self.nvert = 0;
+        } else if keyword_at(line, b"endfacet") {
+            if self.nvert == 3 {
+                self.push_facet();
+            }
+            self.nvert = 0;
+        }
+    }
+
+    fn push_facet(&mut self) {
+        for v in self.facet {
+            let t = Vec3::from_array(v);
+            self.min = self.min.min(t);
+            self.max = self.max.max(t);
+            self.positions.push(v);
+        }
+    }
+
+    fn finish(mut self) -> Result<ParsedMesh> {
+        if self.nvert == 3 {
+            self.push_facet();
+        }
+        if self.positions.is_empty() {
+            bail!("STL has zero triangles");
+        }
+        Ok(ParsedMesh {
+            positions: self.positions,
+            min: self.min,
+            max: self.max,
+        })
+    }
+}
+
+fn trim_ascii(s: &[u8]) -> &[u8] {
+    skip_ascii_ws(s).trim_ascii_end()
+}
+
+fn skip_ascii_ws(s: &[u8]) -> &[u8] {
+    let n = s
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(s.len());
+    &s[n..]
+}
+
+fn keyword_at(line: &[u8], kw: &[u8]) -> bool {
+    line.len() >= kw.len()
+        && line[..kw.len()].eq_ignore_ascii_case(kw)
+        && (line.len() == kw.len() || line[kw.len()].is_ascii_whitespace())
+}
+
+fn parse_xyz_bytes(s: &[u8]) -> Option<[f32; 3]> {
+    let (x, s) = parse_f32_token(s)?;
+    let (y, s) = parse_f32_token(skip_ascii_ws(s))?;
+    let (z, _) = parse_f32_token(skip_ascii_ws(s))?;
     Some([x, y, z])
+}
+
+fn parse_f32_token(s: &[u8]) -> Option<(f32, &[u8])> {
+    let (n, used) = fast_float2::parse_partial::<f32, _>(s).ok()?;
+    if used == 0 {
+        return None;
+    }
+    Some((n, &s[used..]))
 }
 
 fn declared_binary_len(bytes: &[u8]) -> Option<usize> {
@@ -252,7 +416,18 @@ fn looks_like_ascii(bytes: &[u8]) -> bool {
             .any(|&b| b == 0)
 }
 
-fn recenter(mut positions: Vec<[f32; 3]>) -> TriangleSoup {
+fn bounds_to_soup(positions: Vec<[f32; 3]>, min: Vec3, max: Vec3) -> TriangleSoup {
+    let origin = (min + max) * 0.5;
+    let radius = (max - min).length() * 0.5;
+    TriangleSoup {
+        positions,
+        origin,
+        radius: radius.max(1e-6),
+    }
+}
+
+#[cfg(test)]
+fn recenter(positions: Vec<[f32; 3]>) -> TriangleSoup {
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     for p in &positions {
@@ -260,18 +435,7 @@ fn recenter(mut positions: Vec<[f32; 3]>) -> TriangleSoup {
         min = min.min(v);
         max = max.max(v);
     }
-    let origin = (min + max) * 0.5;
-    for p in &mut positions {
-        p[0] -= origin.x;
-        p[1] -= origin.y;
-        p[2] -= origin.z;
-    }
-    let radius = (max - min).length() * 0.5;
-    TriangleSoup {
-        positions,
-        origin,
-        radius: radius.max(1e-6),
-    }
+    bounds_to_soup(positions, min, max)
 }
 
 #[cfg(test)]

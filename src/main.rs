@@ -13,23 +13,14 @@
 
 #![warn(missing_docs)]
 
-mod app;
-mod camera;
-mod gpu;
-mod open;
-mod stl;
-mod view_cube;
-
 use std::path::PathBuf;
 
-use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
 use eframe::egui_wgpu::wgpu::{Backends, InstanceDescriptor};
+use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+use meshpad::app::MeshpadApp;
 
 fn main() -> eframe::Result<()> {
-    let paths: Vec<PathBuf> = std::env::args_os()
-        .skip(1)
-        .map(PathBuf::from)
-        .collect();
+    let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
 
     let wgpu_options = WgpuConfiguration {
         wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
@@ -56,6 +47,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Meshpad",
         options,
-        Box::new(move |cc| Ok(Box::new(app::MeshpadApp::new(cc, paths)))),
+        Box::new(move |cc| Ok(Box::new(MeshpadApp::new(cc, paths)))),
     )
 }
