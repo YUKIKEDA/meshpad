@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mesh_io import read_ply, subdivide, write_stl_binary
+from mesh_io import read_ply, subdivide, write_stl_ascii, write_stl_binary
 from nas_pynastran import write_hex, write_shell, write_tet
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,16 +36,24 @@ def _wipe_nas() -> None:
         d.mkdir(parents=True)
 
 
-def emit_stl(tag: str, ply: Path, *, subdiv: int = 0):
+ASCII_TAGS = frozenset({"bunny_res3", "bunny", "happy_res2", "happy"})
+
+
+def emit_stl(tag: str, ply: Path, *, subdiv: int = 0, binary: bool = True, ascii: bool = False):
     print(f"read {ply} ...")
     mesh = read_ply(ply)
     if subdiv:
         print(f"  subdivide x{subdiv} ({mesh.nfaces} faces) ...")
         mesh = subdivide(mesh, subdiv)
     print(f"  {mesh.nverts} verts, {mesh.nfaces} faces")
-    stl = DERIVED / "stl" / f"{tag}.stl"
-    ntri = write_stl_binary(stl, mesh)
-    print(f"  wrote {stl}  {ntri} tri  {_mb(stl):.2f} MB")
+    if binary:
+        stl = DERIVED / "stl" / f"{tag}.stl"
+        ntri = write_stl_binary(stl, mesh)
+        print(f"  wrote {stl}  {ntri} tri  {_mb(stl):.2f} MB")
+    if ascii:
+        astl = DERIVED / "stl_ascii" / f"{tag}.stl"
+        ntri = write_stl_ascii(astl, mesh)
+        print(f"  wrote {astl}  {ntri} tri  {_mb(astl):.2f} MB")
     return mesh
 
 
@@ -73,24 +81,27 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--tier", choices=("core", "all"), default="core")
     p.add_argument("--stl-only", action="store_true")
+    p.add_argument("--ascii-only", action="store_true")
     p.add_argument("--nas-only", action="store_true")
     args = p.parse_args()
-    if args.stl_only and args.nas_only:
-        p.error("pick one of --stl-only / --nas-only")
+    if sum((args.stl_only, args.ascii_only, args.nas_only)) > 1:
+        p.error("pick one of --stl-only / --ascii-only / --nas-only")
 
     DERIVED.mkdir(parents=True, exist_ok=True)
     (DERIVED / "stl").mkdir(exist_ok=True)
+    (DERIVED / "stl_ascii").mkdir(exist_ok=True)
 
     bunny = _need(DATA / "bunny" / "bun_zipper.ply")
     bunny_s = _need(DATA / "bunny" / "bun_zipper_res3.ply")
     happy = _need(DATA / "happy_recon" / "happy_vrip.ply")
     happy2 = _need(DATA / "happy_recon" / "happy_vrip_res2.ply")
 
-    do_stl = not args.nas_only
-    do_nas = not args.stl_only
+    do_stl = not args.nas_only and not args.ascii_only
+    do_ascii = not args.nas_only and not args.stl_only
+    do_nas = not args.stl_only and not args.ascii_only
 
     meshes = {}
-    if do_stl or do_nas:
+    if do_stl or do_ascii or do_nas:
         for tag, src, subdiv in (
             ("bunny_res3", bunny_s, 0),
             ("bunny", bunny, 0),
@@ -98,8 +109,13 @@ def main() -> int:
             ("happy", happy, 0),
             ("happy_subdiv1", happy, 1),
         ):
-            if do_stl:
-                meshes[tag] = emit_stl(tag, src, subdiv=subdiv)
+            want_ascii = do_ascii and tag in ASCII_TAGS
+            if do_stl or want_ascii:
+                if tag == "happy_subdiv1" and not do_stl:
+                    continue
+                meshes[tag] = emit_stl(
+                    tag, src, subdiv=subdiv, binary=do_stl, ascii=want_ascii
+                )
             elif do_nas and tag != "happy_subdiv1":
                 print(f"read {src} for NAS ...")
                 mesh = read_ply(src)

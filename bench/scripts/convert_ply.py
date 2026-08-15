@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert one PLY mesh to binary STL and/or pyNastran bulk NAS."""
+"""Convert one PLY mesh to STL (binary or ASCII) and/or pyNastran bulk NAS."""
 
 from __future__ import annotations
 
@@ -8,29 +8,35 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mesh_io import read_ply, subdivide, write_stl_binary
+from mesh_io import read_ply, subdivide, write_stl_ascii, write_stl_binary
 from nas_pynastran import write_shell
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("ply")
-    p.add_argument("--stl")
+    p.add_argument("--stl", help="binary STL output path")
+    p.add_argument("--stl-ascii", help="ASCII STL output path")
     p.add_argument("--nas")
     p.add_argument("--nas-size", type=int, choices=(8, 16), default=8)
     p.add_argument("--subdiv", type=int, default=0)
     p.add_argument("--tile", default="1,1,1", help="Nx,Ny,Nz copies (STL only)")
     args = p.parse_args()
-    if not args.stl and not args.nas:
-        p.error("specify --stl and/or --nas")
+    if not args.stl and not args.stl_ascii and not args.nas:
+        p.error("specify --stl, --stl-ascii, and/or --nas")
     mesh = read_ply(Path(args.ply))
     if args.subdiv:
         mesh = subdivide(mesh, args.subdiv)
     print(f"{mesh.nverts} verts, {mesh.nfaces} faces")
-    if args.stl:
+    if args.stl or args.stl_ascii:
         nx, ny, nz = (int(x) for x in args.tile.split(","))
-        n = write_stl_binary(Path(args.stl), mesh, copies=(nx, ny, nz))
-        print(f"STL {n} triangles -> {args.stl}")
+        copies = (nx, ny, nz)
+        if args.stl:
+            n = write_stl_binary(Path(args.stl), mesh, copies=copies)
+            print(f"STL {n} triangles -> {args.stl}")
+        if args.stl_ascii:
+            n = write_stl_ascii(Path(args.stl_ascii), mesh, copies=copies)
+            print(f"ASCII STL {n} triangles -> {args.stl_ascii}")
     if args.nas:
         if args.tile != "1,1,1":
             p.error("--tile is STL-only")

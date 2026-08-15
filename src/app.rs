@@ -4,6 +4,7 @@
 //! `F` で全体フィット。左下のビューキューブで向き＋ズームを揃える。
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use eframe::egui::{self, Color32, PointerButton, RichText, Sense};
 use glam::Vec2;
@@ -30,7 +31,7 @@ pub struct MeshpadApp {
 }
 
 impl MeshpadApp {
-    /// wgpu レンダラを初期化し、パスがあればバイナリ STL を載せる。
+    /// wgpu レンダラを初期化し、パスがあれば STL を載せる。
     ///
     /// `initial_paths` が空なら空シーンのまま起動する。ダイアログは出さない。
     ///
@@ -77,28 +78,32 @@ impl MeshpadApp {
             }
         }
 
-        self.title_file = files.first().map(|p| file_label(p, files.len()));
         self.tween = None;
 
         if stl_files.is_empty() {
             self.scene = None;
             self.pending_fit = None;
+            self.title_file = None;
             self.warnings = warnings;
             self.status = "no mesh could be opened".into();
             return;
         }
 
-        match stl::load_binary_paths(&stl_files) {
+        let started = Instant::now();
+        match stl::load_paths(&stl_files) {
             Ok((soup, load_warnings)) => {
+                let load_ms = started.elapsed().as_secs_f64() * 1000.0;
                 warnings.extend(load_warnings);
                 self.warnings = warnings;
                 self.scene = Some(SceneGpu::from_soup(device, &soup));
                 self.pending_fit = Some(soup.radius);
-                self.status = format!("{} triangles", soup.triangle_count());
+                self.title_file = stl_files.first().map(|p| file_label(p, stl_files.len()));
+                self.status = format_load_status(soup.triangle_count(), load_ms);
             }
             Err(e) => {
                 self.scene = None;
                 self.pending_fit = None;
+                self.title_file = None;
                 self.warnings = warnings;
                 self.status = e.to_string();
             }
@@ -123,6 +128,15 @@ impl MeshpadApp {
         if let Some(rs) = frame.wgpu_render_state() {
             self.open_paths(&rs.device, paths);
         }
+    }
+}
+
+// mmap・パース・再中心化までの時間。GPU アップロードは含めない。
+fn format_load_status(triangles: usize, load_ms: f64) -> String {
+    if load_ms < 10.0 {
+        format!("{triangles} triangles  {load_ms:.1}ms")
+    } else {
+        format!("{triangles} triangles  {load_ms:.0}ms")
     }
 }
 
