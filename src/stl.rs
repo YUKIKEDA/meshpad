@@ -11,40 +11,15 @@ use glam::Vec3;
 use memmap2::Mmap;
 use rayon::prelude::*;
 
+use crate::mesh::{bounds_to_soup, ParsedMesh};
+
 const HEADER: usize = 80;
 const RECORD: usize = 50;
 /// これ以上の三角形は展開と AABB を Rayon で分割する。
 const PAR_TRIANGLES: usize = 250_000;
 const PAR_TRI_CHUNK: usize = 16_384;
 
-/// GPU へ渡す前の三角形スープ。
-///
-/// 位置だけを持つ。隣接頂点は共有せず、法線はシェーダ側で面ごとに出す。
-/// `positions` はファイル座標のまま。[`Self::origin`] は AABB 中心。GPU へ載せるときに引く。
-#[derive(Debug, Clone)]
-pub struct TriangleSoup {
-    /// 3 頂点で 1 三角形。ファイル座標（中心化しない）。
-    pub positions: Vec<[f32; 3]>,
-    /// 元ファイル空間での AABB 中心。
-    pub origin: Vec3,
-    /// AABB 外接球の半径。空に近いメッシュでも下限を持つ。
-    pub radius: f32,
-}
-
-impl TriangleSoup {
-    /// 三角形の枚数を返す。
-    ///
-    /// `positions` は 3 頂点ずつなので、長さを 3 で割った値。
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// assert_eq!(soup.triangle_count(), soup.positions.len() / 3);
-    /// ```
-    pub fn triangle_count(&self) -> usize {
-        self.positions.len() / 3
-    }
-}
+pub use crate::mesh::TriangleSoup;
 
 /// 複数の STL（バイナリまたは ASCII）をワールド座標のまま結合する。
 ///
@@ -106,7 +81,7 @@ pub fn load_stl(path: &Path) -> Result<Vec<[f32; 3]>> {
     Ok(load_parsed(path)?.positions)
 }
 
-fn load_parsed(path: &Path) -> Result<ParsedMesh> {
+pub(crate) fn load_parsed(path: &Path) -> Result<ParsedMesh> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }.with_context(|| format!("mmap {}", path.display()))?;
     parse_parsed(&mmap)
@@ -137,12 +112,6 @@ fn parse_parsed(bytes: &[u8]) -> Result<ParsedMesh> {
     } else {
         parse_binary_mesh(bytes)
     }
-}
-
-struct ParsedMesh {
-    positions: Vec<[f32; 3]>,
-    min: Vec3,
-    max: Vec3,
 }
 
 /// バイト列をバイナリ STL として解釈する。
@@ -414,16 +383,6 @@ fn looks_like_ascii(bytes: &[u8]) -> bool {
             .iter()
             .take(64)
             .any(|&b| b == 0)
-}
-
-fn bounds_to_soup(positions: Vec<[f32; 3]>, min: Vec3, max: Vec3) -> TriangleSoup {
-    let origin = (min + max) * 0.5;
-    let radius = (max - min).length() * 0.5;
-    TriangleSoup {
-        positions,
-        origin,
-        radius: radius.max(1e-6),
-    }
 }
 
 #[cfg(test)]

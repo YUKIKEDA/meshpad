@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// 1.0 でシーンに載せられる拡張子に対応する種類。
 ///
-/// NAS はこのマイルストーンではまだ読めないが、列には残して警告する。
+/// `.stl` は三角形、`.nas` / `.nastran` は外皮三角形として同じシーンに載せる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MeshKind {
     /// `.stl`（大文字小文字は問わない）。

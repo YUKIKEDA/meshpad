@@ -190,7 +190,9 @@ fn row(path: &Path, gpu: Option<&(wgpu::Device, wgpu::Queue)>) -> anyhow::Result
     );
 
     let gpu_s = match gpu {
-        Some((device, _)) if (tris as u64).saturating_mul(36) <= device.limits().max_buffer_size => {
+        Some((device, _))
+            if (tris as u64).saturating_mul(36) <= device.limits().max_buffer_size =>
+        {
             let (mesh, _) = stl::load_paths(&[path]).unwrap();
             Some(median(
                 || {

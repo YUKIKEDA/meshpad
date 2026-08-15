@@ -5,6 +5,9 @@
 pub mod app;
 pub mod camera;
 pub mod gpu;
+pub mod load;
+pub mod mesh;
+pub(crate) mod nas;
 pub mod open;
 pub mod stl;
 pub mod view_cube;

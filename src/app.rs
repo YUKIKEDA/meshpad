@@ -11,8 +11,8 @@ use glam::Vec2;
 
 use crate::camera::{Camera, CameraTween};
 use crate::gpu::{Renderer, SceneGpu};
-use crate::open::{self, MeshKind};
-use crate::stl;
+use crate::load;
+use crate::open;
 use crate::view_cube;
 
 /// Meshpad のウィンドウ本体。
@@ -31,7 +31,7 @@ pub struct MeshpadApp {
 }
 
 impl MeshpadApp {
-    /// wgpu レンダラを初期化し、パスがあれば STL を載せる。
+    /// wgpu レンダラを初期化し、パスがあればメッシュを載せる。
     ///
     /// `initial_paths` が空なら空シーンのまま起動する。ダイアログは出さない。
     ///
@@ -67,20 +67,9 @@ impl MeshpadApp {
 
     fn open_paths(&mut self, device: &eframe::egui_wgpu::wgpu::Device, paths: &[PathBuf]) {
         let (files, mut warnings) = open::expand_open_inputs(paths);
-        let mut stl_files = Vec::new();
-        for f in &files {
-            match open::mesh_kind(f) {
-                Some(MeshKind::Stl) => stl_files.push(f.clone()),
-                Some(MeshKind::Nas) => {
-                    warnings.push(format!("{}: NAS is not in this milestone", f.display()));
-                }
-                None => {}
-            }
-        }
-
         self.tween = None;
 
-        if stl_files.is_empty() {
+        if files.is_empty() {
             self.scene = None;
             self.pending_fit = None;
             self.title_file = None;
@@ -90,14 +79,14 @@ impl MeshpadApp {
         }
 
         let started = Instant::now();
-        match stl::load_paths(&stl_files) {
+        match load::load_paths(&files) {
             Ok((soup, load_warnings)) => {
                 let load_ms = started.elapsed().as_secs_f64() * 1000.0;
                 warnings.extend(load_warnings);
                 self.warnings = warnings;
                 self.scene = Some(SceneGpu::from_soup(device, &soup));
                 self.pending_fit = Some(soup.radius);
-                self.title_file = stl_files.first().map(|p| file_label(p, stl_files.len()));
+                self.title_file = files.first().map(|p| file_label(p, files.len()));
                 self.status = format_load_status(soup.triangle_count(), load_ms);
             }
             Err(e) => {
@@ -115,6 +104,7 @@ impl MeshpadApp {
             .set_title("Open")
             .add_filter("Mesh", &["stl", "nas", "nastran"])
             .add_filter("STL", &["stl"])
+            .add_filter("NAS", &["nas", "nastran"])
             .pick_files();
         if let Some(files) = picked {
             self.open_if_device(frame, &files);
