@@ -360,19 +360,22 @@ fn paint_caption_icon(
     }
 }
 
-fn window_resize_borders(ctx: &egui::Context) {
-    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
-        return;
+fn caption_btn_band(screen: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(screen.right() - CAPTION_W * 3.0, screen.top()),
+        egui::pos2(screen.right(), screen.top() + TITLE_H),
+    )
+}
+
+fn resize_dir_at(screen: egui::Rect, pos: egui::Pos2) -> Option<egui::viewport::ResizeDirection> {
+    if caption_btn_band(screen).contains(pos) {
+        return None;
     }
-    let Some(pos) = ctx.pointer_latest_pos() else {
-        return;
-    };
-    let screen = ctx.screen_rect();
     let l = pos.x - screen.left() <= RESIZE_PAD;
     let r = screen.right() - pos.x <= RESIZE_PAD;
     let t = pos.y - screen.top() <= RESIZE_PAD;
     let b = screen.bottom() - pos.y <= RESIZE_PAD;
-    let dir = match (l, r, t, b) {
+    match (l, r, t, b) {
         (true, false, true, false) => Some(egui::viewport::ResizeDirection::NorthWest),
         (false, true, true, false) => Some(egui::viewport::ResizeDirection::NorthEast),
         (true, false, false, true) => Some(egui::viewport::ResizeDirection::SouthWest),
@@ -382,8 +385,17 @@ fn window_resize_borders(ctx: &egui::Context) {
         (false, false, true, false) => Some(egui::viewport::ResizeDirection::North),
         (false, false, false, true) => Some(egui::viewport::ResizeDirection::South),
         _ => None,
+    }
+}
+
+fn window_resize_borders(ctx: &egui::Context) {
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+        return;
+    }
+    let Some(pos) = ctx.pointer_latest_pos() else {
+        return;
     };
-    let Some(dir) = dir else {
+    let Some(dir) = resize_dir_at(ctx.screen_rect(), pos) else {
         return;
     };
     ctx.set_cursor_icon(match dir {
@@ -597,5 +609,41 @@ impl eframe::App for MeshpadApp {
                     );
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::viewport::ResizeDirection;
+
+    fn win() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0))
+    }
+
+    #[test]
+    fn caption_buttons_are_not_resize_handles() {
+        let screen = win();
+        let y = 2.0;
+        let close = egui::pos2(screen.right() - 2.0, y);
+        let maximize = egui::pos2(screen.right() - CAPTION_W - 2.0, y);
+        let minimize = egui::pos2(screen.right() - CAPTION_W * 2.0 - 2.0, y);
+        assert_eq!(resize_dir_at(screen, close), None);
+        assert_eq!(resize_dir_at(screen, maximize), None);
+        assert_eq!(resize_dir_at(screen, minimize), None);
+    }
+
+    #[test]
+    fn east_resize_still_works_below_the_title_bar() {
+        let screen = win();
+        let pos = egui::pos2(screen.right() - 2.0, TITLE_H + 40.0);
+        assert_eq!(resize_dir_at(screen, pos), Some(ResizeDirection::East));
+    }
+
+    #[test]
+    fn north_resize_still_works_left_of_caption_buttons() {
+        let screen = win();
+        let pos = egui::pos2(400.0, 2.0);
+        assert_eq!(resize_dir_at(screen, pos), Some(ResizeDirection::North));
     }
 }
