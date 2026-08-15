@@ -2,6 +2,8 @@
 //!
 //! ドロップ・ダイアログ・CLI の入口をここで揃える。フォルダは直下だけ見、再帰しない。
 
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// 1.0 でシーンに載せられる拡張子に対応する種類。
@@ -39,6 +41,7 @@ pub fn mesh_kind(path: &Path) -> Option<MeshKind> {
 /// ファイルはメッシュ拡張子だけ残す。未知の拡張子は警告してスキップする。
 /// フォルダは直下の `.stl` / `.nas` / `.nastran` のみ（名前順）。入れ子は見ない。
 /// フォルダ直下の未知ファイルは黙って飛ばす（ドロップ単位の未知ファイルだけ警告する）。
+/// 同じファイルがフォルダ展開と単体指定で重なっても、先に出たパスだけ残す。
 ///
 /// 戻り値の先頭がタイトル用。警告は呼び出し側がバーへ出す。
 ///
@@ -50,6 +53,7 @@ pub fn mesh_kind(path: &Path) -> Option<MeshKind> {
 /// ```
 pub fn expand_open_inputs(inputs: &[impl AsRef<Path>]) -> (Vec<PathBuf>, Vec<String>) {
     let mut files = Vec::new();
+    let mut seen = HashSet::new();
     let mut warnings = Vec::new();
     for input in inputs {
         let path = input.as_ref();
@@ -65,18 +69,32 @@ pub fn expand_open_inputs(inputs: &[impl AsRef<Path>]) -> (Vec<PathBuf>, Vec<Str
                             path.display()
                         ));
                     } else {
-                        files.extend(kids);
+                        for kid in kids {
+                            push_unique(&mut files, &mut seen, kid);
+                        }
                     }
                 }
                 Err(e) => warnings.push(format!("{}: {e}", path.display())),
             },
             PathClass::File => match mesh_kind(path) {
-                Some(_) => files.push(path.to_path_buf()),
+                Some(_) => push_unique(&mut files, &mut seen, path.to_path_buf()),
                 None => warnings.push(format!("{}: unsupported extension", path.display())),
             },
         }
     }
     (files, warnings)
+}
+
+fn path_identity(path: &Path) -> OsString {
+    std::fs::canonicalize(path)
+        .map(|p| p.into_os_string())
+        .unwrap_or_else(|_| path.as_os_str().to_os_string())
+}
+
+fn push_unique(files: &mut Vec<PathBuf>, seen: &mut HashSet<OsString>, path: PathBuf) {
+    if seen.insert(path_identity(&path)) {
+        files.push(path);
+    }
 }
 
 enum PathClass {
@@ -218,6 +236,29 @@ mod tests {
             assert_eq!(files.len(), 2);
             assert_eq!(files[0], first);
             assert_eq!(files[1].file_name().unwrap(), "inner.stl");
+        });
+    }
+
+    #[test]
+    fn folder_and_child_file_are_not_duplicated() {
+        with_temp(|dir| {
+            let stl = dir.join("part.stl");
+            touch(&stl);
+            let (files, warnings) = expand_open_inputs(&[stl.as_path(), dir]);
+            assert!(warnings.is_empty());
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].file_name().unwrap(), "part.stl");
+        });
+    }
+
+    #[test]
+    fn same_folder_twice_is_not_duplicated() {
+        with_temp(|dir| {
+            touch(&dir.join("part.stl"));
+            let (files, warnings) =
+                expand_open_inputs(&[dir.to_path_buf(), dir.to_path_buf()]);
+            assert!(warnings.is_empty());
+            assert_eq!(files.len(), 1);
         });
     }
 }
