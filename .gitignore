@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Stanford sources and generated meshes are local-only (hundreds of MB to GB).
+bench/data/**/*.ply
+bench/data/**/*.stl
+bench/data/**/*.nas
+bench/data/**/*.nastran
+bench/data/derived/
+bench/data/local/
