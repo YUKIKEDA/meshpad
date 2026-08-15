@@ -30,7 +30,7 @@ pub struct MeshpadApp {
 }
 
 impl MeshpadApp {
-    /// wgpu レンダラを初期化し、パスがあればバイナリ STL を載せる。
+    /// wgpu レンダラを初期化し、パスがあれば STL を載せる。
     ///
     /// `initial_paths` が空なら空シーンのまま起動する。ダイアログは出さない。
     ///
@@ -77,28 +77,30 @@ impl MeshpadApp {
             }
         }
 
-        self.title_file = files.first().map(|p| file_label(p, files.len()));
         self.tween = None;
 
         if stl_files.is_empty() {
             self.scene = None;
             self.pending_fit = None;
+            self.title_file = None;
             self.warnings = warnings;
             self.status = "no mesh could be opened".into();
             return;
         }
 
-        match stl::load_binary_paths(&stl_files) {
+        match stl::load_paths(&stl_files) {
             Ok((soup, load_warnings)) => {
                 warnings.extend(load_warnings);
                 self.warnings = warnings;
                 self.scene = Some(SceneGpu::from_soup(device, &soup));
                 self.pending_fit = Some(soup.radius);
+                self.title_file = stl_files.first().map(|p| file_label(p, stl_files.len()));
                 self.status = format!("{} triangles", soup.triangle_count());
             }
             Err(e) => {
                 self.scene = None;
                 self.pending_fit = None;
+                self.title_file = None;
                 self.warnings = warnings;
                 self.status = e.to_string();
             }
