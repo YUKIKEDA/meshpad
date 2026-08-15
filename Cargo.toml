@@ -1,0 +1,18 @@
+[package]
+name = "meshpad"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight STL/NAS 3D viewer"
+
+[dependencies]
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+eframe = { version = "0.32", default-features = false, features = ["wgpu", "default_fonts"] }
+egui = "0.32"
+glam = { version = "0.30", features = ["bytemuck"] }
+memmap2 = "0.9"
+wgpu = { version = "25", default-features = true }
+
+[profile.release]
+lto = true
+codegen-units = 1
