@@ -1,9 +1,7 @@
 //! eframe 上の Meshpad ウィンドウ。
 //!
-//! 起動引数のパスをバイナリ STL として開き、ビュー全面に描画する。
-//!
+//! 起動引数・ドロップ・「ファイル → 開く」のファイル列は、いずれも新しいシーンになる。
 //! `F` で全体フィット。左下のビューキューブで向き＋ズームを揃える。
-//! ファイルダイアログとドロップは後のマイルストーン。
 
 use std::path::{Path, PathBuf};
 
@@ -12,12 +10,13 @@ use glam::Vec2;
 
 use crate::camera::{Camera, CameraTween};
 use crate::gpu::{Renderer, SceneGpu};
+use crate::open::{self, MeshKind};
 use crate::stl;
 use crate::view_cube;
 
 /// Meshpad のウィンドウ本体。
 ///
-/// メニューなしの細いステータスバーと、ビュー全面の 3D を持つ。
+/// 細いファイルメニューとステータス、ビュー全面の 3D を持つ。
 pub struct MeshpadApp {
     renderer: Renderer,
     scene: Option<SceneGpu>,
@@ -33,7 +32,7 @@ pub struct MeshpadApp {
 impl MeshpadApp {
     /// wgpu レンダラを初期化し、パスがあればバイナリ STL を載せる。
     ///
-    /// `initial_paths` が空なら空シーンのまま起動する。
+    /// `initial_paths` が空なら空シーンのまま起動する。ダイアログは出さない。
     ///
     /// # Panics
     ///
@@ -66,23 +65,63 @@ impl MeshpadApp {
     }
 
     fn open_paths(&mut self, device: &eframe::egui_wgpu::wgpu::Device, paths: &[PathBuf]) {
-        match stl::load_binary_paths(paths) {
-            Ok((soup, warnings)) => {
+        let (files, mut warnings) = open::expand_open_inputs(paths);
+        let mut stl_files = Vec::new();
+        for f in &files {
+            match open::mesh_kind(f) {
+                Some(MeshKind::Stl) => stl_files.push(f.clone()),
+                Some(MeshKind::Nas) => {
+                    warnings.push(format!("{}: NAS is not in this milestone", f.display()));
+                }
+                None => {}
+            }
+        }
+
+        self.title_file = files.first().map(|p| file_label(p, files.len()));
+        self.tween = None;
+
+        if stl_files.is_empty() {
+            self.scene = None;
+            self.pending_fit = None;
+            self.warnings = warnings;
+            self.status = "no mesh could be opened".into();
+            return;
+        }
+
+        match stl::load_binary_paths(&stl_files) {
+            Ok((soup, load_warnings)) => {
+                warnings.extend(load_warnings);
                 self.warnings = warnings;
                 self.scene = Some(SceneGpu::from_soup(device, &soup));
                 self.pending_fit = Some(soup.radius);
-                self.tween = None;
-                self.title_file = paths.first().map(|p| file_label(p, paths.len()));
                 self.status = format!("{} triangles", soup.triangle_count());
             }
             Err(e) => {
                 self.scene = None;
                 self.pending_fit = None;
-                self.tween = None;
-                self.warnings.clear();
-                self.title_file = None;
+                self.warnings = warnings;
                 self.status = e.to_string();
             }
+        }
+    }
+
+    fn try_open_dialog(&mut self, frame: &eframe::Frame) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Open")
+            .add_filter("Mesh", &["stl", "nas", "nastran"])
+            .add_filter("STL", &["stl"])
+            .pick_files();
+        if let Some(files) = picked {
+            self.open_if_device(frame, &files);
+        }
+    }
+
+    fn open_if_device(&mut self, frame: &eframe::Frame, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        if let Some(rs) = frame.wgpu_render_state() {
+            self.open_paths(&rs.device, paths);
         }
     }
 }
@@ -100,13 +139,30 @@ fn file_label(path: &Path, count: usize) -> String {
     }
 }
 
+fn dropped_paths(ctx: &egui::Context) -> Vec<PathBuf> {
+    ctx.input(|i| {
+        i.raw
+            .dropped_files
+            .iter()
+            .filter_map(|f| f.path.clone())
+            .collect()
+    })
+}
+
+fn hover_dropping(ctx: &egui::Context) -> bool {
+    ctx.input(|i| !i.raw.hovered_files.is_empty())
+}
+
 impl eframe::App for MeshpadApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let title = match &self.title_file {
-            Some(f) => format!("Meshpad — {f}"),
+            Some(f) => format!("Meshpad - {f}"),
             None => "Meshpad".into(),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+
+        let mut want_open =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O));
 
         egui::TopBottomPanel::top("bar")
             .exact_height(28.0)
@@ -117,7 +173,12 @@ impl eframe::App for MeshpadApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new("Meshpad").strong().color(Color32::from_gray(210)));
+                    ui.menu_button("File", |ui| {
+                        if ui.button("Open...    Ctrl+O").clicked() {
+                            ui.close();
+                            want_open = true;
+                        }
+                    });
                     if !self.status.is_empty() {
                         ui.separator();
                         ui.label(RichText::new(&self.status).color(Color32::from_gray(160)));
@@ -127,6 +188,15 @@ impl eframe::App for MeshpadApp {
                     }
                 });
             });
+
+        if want_open {
+            self.try_open_dialog(frame);
+        } else {
+            let dropped = dropped_paths(ctx);
+            if !dropped.is_empty() {
+                self.open_if_device(frame, &dropped);
+            }
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_rgb(26, 26, 28)))
@@ -138,9 +208,8 @@ impl eframe::App for MeshpadApp {
                     self.camera.fit(radius, aspect);
                     self.tween = None;
                 }
-                if self.scene.is_some() {
-                    self.camera.distance =
-                        self.camera.distance.max(self.scene.as_ref().unwrap().radius * 3.0);
+                if let Some(scene) = &self.scene {
+                    self.camera.distance = self.camera.distance.max(scene.radius * 3.0);
                 }
 
                 if ui.input(|i| i.key_pressed(egui::Key::F)) {
@@ -235,17 +304,35 @@ impl eframe::App for MeshpadApp {
                     }
                 }
 
+                let dropping = hover_dropping(ctx);
                 if self.scene.is_none() {
+                    if !dropping {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Drop a file, or File -> Open",
+                            egui::FontId::proportional(16.0),
+                            Color32::from_gray(130),
+                        );
+                    }
+                } else if !dropping {
+                    let (view, _, _) = self.camera.view_proj(aspect);
+                    view_cube::paint(ui, rect, view);
+                }
+
+                if dropping {
+                    ui.painter().rect_filled(
+                        rect,
+                        0.0,
+                        Color32::from_rgba_unmultiplied(20, 40, 70, 180),
+                    );
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        "meshpad <file.stl>",
-                        egui::FontId::proportional(16.0),
-                        Color32::from_gray(130),
+                        "Drop to open (replaces the current scene)",
+                        egui::FontId::proportional(18.0),
+                        Color32::from_gray(235),
                     );
-                } else {
-                    let (view, _, _) = self.camera.view_proj(aspect);
-                    view_cube::paint(ui, rect, view);
                 }
             });
     }
