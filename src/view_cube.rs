@@ -91,7 +91,7 @@ fn faces() -> [(Vec3, [Vec3; 4], &'static str, Color32); 6] {
                 Vec3::new(-1.0, 1.0, -1.0),
                 Vec3::new(-1.0, -1.0, -1.0),
             ],
-            "−X",
+            "-X",
             Color32::from_rgb(120, 48, 48),
         ),
         (
@@ -113,7 +113,7 @@ fn faces() -> [(Vec3, [Vec3; 4], &'static str, Color32); 6] {
                 Vec3::new(1.0, -1.0, -1.0),
                 Vec3::new(1.0, -1.0, 1.0),
             ],
-            "−Y",
+            "-Y",
             Color32::from_rgb(44, 96, 52),
         ),
         (
@@ -135,7 +135,7 @@ fn faces() -> [(Vec3, [Vec3; 4], &'static str, Color32); 6] {
                 Vec3::new(1.0, -1.0, -1.0),
                 Vec3::new(-1.0, -1.0, -1.0),
             ],
-            "−Z",
+            "-Z",
             Color32::from_rgb(48, 64, 120),
         ),
     ]

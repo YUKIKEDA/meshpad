@@ -11,6 +11,7 @@ eframe = { version = "0.32", default-features = false, features = ["wgpu", "defa
 egui = "0.32"
 glam = { version = "0.30", features = ["bytemuck"] }
 memmap2 = "0.9"
+rfd = "0.17"
 wgpu = { version = "25", default-features = true }
 
 [profile.release]
