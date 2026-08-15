@@ -1,7 +1,7 @@
 //! Meshpad は STL/NAS 向けの軽量 3D ビューアです。
 //!
 //! メモ帳のように単体 exe で開き、形をすぐ確認することを目的にする。
-//! いまの実行ファイルはバイナリ STL を CLI から読み、直交ターンテーブルで回せる。
+//! いまの実行ファイルはバイナリ STL を CLI から読み、直交投影の自由軌道で回せる。
 //!
 //! # Examples
 //!
@@ -17,6 +17,7 @@ mod app;
 mod camera;
 mod gpu;
 mod stl;
+mod view_cube;
 
 use std::path::PathBuf;
 

@@ -1,15 +1,19 @@
 //! eframe 上の Meshpad ウィンドウ。
 //!
-//! 起動引数のパスをバイナリ STL として開き、ビュー全面に描画する。ファイルダイアログとドロップは後のマイルストーン。
+//! 起動引数のパスをバイナリ STL として開き、ビュー全面に描画する。
+//!
+//! `F` で全体フィット。左下のビューキューブで向き＋ズームを揃える。
+//! ファイルダイアログとドロップは後のマイルストーン。
 
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, PointerButton, RichText, Sense};
 use glam::Vec2;
 
-use crate::camera::Camera;
-use crate::gpu::{self, Renderer, SceneGpu};
+use crate::camera::{Camera, CameraTween};
+use crate::gpu::{Renderer, SceneGpu};
 use crate::stl;
+use crate::view_cube;
 
 /// Meshpad のウィンドウ本体。
 ///
@@ -20,6 +24,7 @@ pub struct MeshpadApp {
     camera: Camera,
     /// 次フレームの実ビューポートで [`Camera::fit`] する半径。
     pending_fit: Option<f32>,
+    tween: Option<CameraTween>,
     status: String,
     warnings: Vec<String>,
     title_file: Option<String>,
@@ -49,6 +54,7 @@ impl MeshpadApp {
             scene: None,
             camera: Camera::default(),
             pending_fit: None,
+            tween: None,
             status: String::new(),
             warnings: Vec::new(),
             title_file: None,
@@ -65,12 +71,14 @@ impl MeshpadApp {
                 self.warnings = warnings;
                 self.scene = Some(SceneGpu::from_soup(device, &soup));
                 self.pending_fit = Some(soup.radius);
+                self.tween = None;
                 self.title_file = paths.first().map(|p| file_label(p, paths.len()));
                 self.status = format!("{} triangles", soup.triangle_count());
             }
             Err(e) => {
                 self.scene = None;
                 self.pending_fit = None;
+                self.tween = None;
                 self.warnings.clear();
                 self.title_file = None;
                 self.status = e.to_string();
@@ -128,17 +136,33 @@ impl eframe::App for MeshpadApp {
                 let aspect = (rect.width() / rect.height().max(1.0)).max(0.05);
                 if let Some(radius) = self.pending_fit.take() {
                     self.camera.fit(radius, aspect);
+                    self.tween = None;
                 }
                 if self.scene.is_some() {
-                    self.camera.distance = (self.camera.distance).max(self.scene.as_ref().unwrap().radius * 3.0);
+                    self.camera.distance =
+                        self.camera.distance.max(self.scene.as_ref().unwrap().radius * 3.0);
                 }
 
-                if response.dragged_by(PointerButton::Primary) {
+                if ui.input(|i| i.key_pressed(egui::Key::F)) {
+                    if let Some(scene) = &self.scene {
+                        let mut goal = self.camera.clone();
+                        goal.fit(scene.radius, aspect);
+                        self.tween = CameraTween::toward(&self.camera, &goal);
+                        if self.tween.is_none() {
+                            self.camera = goal;
+                        }
+                    }
+                }
+
+                let orbiting = response.dragged_by(PointerButton::Primary);
+                let panning = response.dragged_by(PointerButton::Secondary)
+                    || response.dragged_by(PointerButton::Middle);
+                if orbiting {
+                    self.tween = None;
                     self.camera.rotate(Vec2::new(response.drag_delta().x, response.drag_delta().y));
                 }
-                if response.dragged_by(PointerButton::Secondary)
-                    || response.dragged_by(PointerButton::Middle)
-                {
+                if panning {
+                    self.tween = None;
                     self.camera.pan(
                         Vec2::new(response.drag_delta().x, response.drag_delta().y),
                         Vec2::new(rect.width(), rect.height()),
@@ -147,6 +171,7 @@ impl eframe::App for MeshpadApp {
                 if response.hovered() {
                     let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                     if scroll.abs() > 0.0 {
+                        self.tween = None;
                         let factor = (0.0015 * -scroll).exp();
                         if let Some(pos) = response.hover_pos() {
                             let ndc = Vec2::new(
@@ -155,9 +180,33 @@ impl eframe::App for MeshpadApp {
                             );
                             self.camera.zoom_at(factor, ndc, aspect);
                         } else {
-                            self.camera.half_height =
-                                (self.camera.half_height * factor).clamp(1e-6, 1e12);
+                            self.camera.apply_zoom_factor(factor, aspect);
                         }
+                    }
+                }
+
+                if self.scene.is_some() && response.clicked() {
+                    let (view, _, _) = self.camera.view_proj(aspect);
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        if let Some(hit) = view_cube::pick(view, rect, pos) {
+                            if let Some(scene) = &self.scene {
+                                let mut goal = self.camera.clone();
+                                goal.snap_and_fit(hit.dir, scene.radius, aspect);
+                                self.tween = CameraTween::toward(&self.camera, &goal);
+                                if self.tween.is_none() {
+                                    self.camera = goal;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(tw) = self.tween.as_mut() {
+                    let dt = ctx.input(|i| i.stable_dt);
+                    if tw.tick(&mut self.camera, dt) {
+                        ctx.request_repaint();
+                    } else {
+                        self.tween = None;
                     }
                 }
 
@@ -196,7 +245,7 @@ impl eframe::App for MeshpadApp {
                     );
                 } else {
                     let (view, _, _) = self.camera.view_proj(aspect);
-                    gpu::draw_axis_gizmo(ui, rect, view);
+                    view_cube::paint(ui, rect, view);
                 }
             });
     }

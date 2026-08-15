@@ -6,7 +6,7 @@ use std::num::NonZeroU64;
 
 use eframe::egui_wgpu::wgpu::util::DeviceExt as _;
 use eframe::egui_wgpu::{self, wgpu};
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 
 use crate::camera::Camera;
 use crate::stl::TriangleSoup;
@@ -364,28 +364,3 @@ fn make_targets(
     (color, color_view, depth, depth_view)
 }
 
-/// ビュー左下に、回転だけ反映した XYZ 軸を描く。
-///
-/// 平行移動は入れない向きウィジェット。X 赤、Y 緑、Z 青。
-pub fn draw_axis_gizmo(ui: &egui::Ui, rect: egui::Rect, view: Mat4) {
-    let origin = rect.left_bottom() + egui::vec2(36.0, -36.0);
-    let scale = 28.0;
-    let axes = [
-        (Vec3::X, egui::Color32::from_rgb(220, 80, 80), "X"),
-        (Vec3::Y, egui::Color32::from_rgb(80, 180, 90), "Y"),
-        (Vec3::Z, egui::Color32::from_rgb(80, 120, 230), "Z"),
-    ];
-    let painter = ui.painter();
-    for (dir, color, label) in axes {
-        let v = view.transform_vector3(dir);
-        let tip = origin + egui::vec2(v.x * scale, -v.y * scale);
-        painter.line_segment([origin, tip], egui::Stroke::new(2.0_f32, color));
-        painter.text(
-            tip + egui::vec2(4.0, -4.0),
-            egui::Align2::LEFT_BOTTOM,
-            label,
-            egui::FontId::proportional(11.0),
-            color,
-        );
-    }
-}
