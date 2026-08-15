@@ -1,0 +1,39 @@
+---
+description: rustdoc の公開 API ドキュメントの書き方（日本語）
+globs: "**/*.rs"
+alwaysApply: false
+---
+
+# rustdoc
+
+公開 API のコメントは [Documenting components](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html#documenting-components) に従う。本文は日本語。
+
+## 構成
+
+```text
+[1 行の要約（検索・モジュール一覧に出る）]
+
+[詳細]
+
+[# Examples（コピーできる例）]
+
+[# Errors / # Panics（該当するとき）]
+```
+
+- 公開なら必ず `///`（モジュール・クレートは `//!`）。
+- 要約は 1 文。型はシグネチャに出るので繰り返さない。
+- 例はコピー可能にする。wgpu 等が無い場合は `ignore` 可。
+- panic しうるなら `# Panics`。`Result` なら `# Errors`。
+
+## 悪い例 / 良い例
+
+要約だけの行は不十分。
+
+```text
+NG:  /// 方位を更新する。
+
+OK:  1 行要約
+     詳細（クランプなど）
+     # Examples
+     # Panics / # Errors（必要なとき）
+```
