@@ -97,7 +97,7 @@ def main() -> int:
     happy2 = _need(DATA / "happy_recon" / "happy_vrip_res2.ply")
 
     do_stl = not args.nas_only and not args.ascii_only
-    do_ascii = not args.nas_only
+    do_ascii = not args.nas_only and not args.stl_only
     do_nas = not args.stl_only and not args.ascii_only
 
     meshes = {}
