@@ -4,15 +4,17 @@
 
 use std::num::NonZeroU64;
 
-use eframe::egui_wgpu::wgpu::util::DeviceExt as _;
 use eframe::egui_wgpu::{self, wgpu};
 use glam::Vec3;
+use rayon::prelude::*;
 
 use crate::camera::Camera;
 use crate::stl::TriangleSoup;
 
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// これ以上の頂点数なら原点引きを Rayon で分割する。
+const PAR_VERTS: usize = 250_000 * 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -38,7 +40,7 @@ pub struct GpuChunk {
 pub struct SceneGpu {
     /// 元ファイル空間での AABB 中心。
     ///
-    /// 頂点は既にこれを引いてある。寸法表示を足すときに戻す。
+    /// GPU 頂点はアップロード時にこれを引く。CPU のスープはファイル座標のまま。寸法表示を足すときに使う。
     #[allow(dead_code)]
     pub origin: Vec3,
     /// シフト後メッシュの外接半径。カメラ距離の下限に使う。
@@ -52,7 +54,7 @@ pub struct SceneGpu {
 impl SceneGpu {
     /// CPU のスープをチャンク 1 個としてアップロードする。
     ///
-    /// プロキシは作らない。頂点は `soup.positions` をそのまま GPU へコピーする。
+    /// プロキシは作らない。mapped バッファへ `positions - origin` を書く。
     ///
     /// # Examples
     ///
@@ -61,7 +63,7 @@ impl SceneGpu {
     /// assert_eq!(scene.chunks.len(), 1);
     /// ```
     pub fn from_soup(device: &wgpu::Device, soup: &TriangleSoup) -> Self {
-        let chunk = upload_chunk(device, &soup.positions);
+        let chunk = upload_chunk(device, &soup.positions, soup.origin);
         Self {
             origin: soup.origin,
             radius: soup.radius,
@@ -82,15 +84,42 @@ impl SceneGpu {
     }
 }
 
-fn upload_chunk(device: &wgpu::Device, positions: &[[f32; 3]]) -> GpuChunk {
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+fn upload_chunk(device: &wgpu::Device, positions: &[[f32; 3]], origin: Vec3) -> GpuChunk {
+    let n = positions.len();
+    let size = (n.max(1) * std::mem::size_of::<[f32; 3]>()) as u64;
+    let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("meshpad.vertices"),
-        contents: bytemuck::cast_slice(positions),
+        size,
         usage: wgpu::BufferUsages::VERTEX,
+        mapped_at_creation: n > 0,
     });
+    if n > 0 {
+        {
+            let mut mapped = vertex_buffer.slice(..).get_mapped_range_mut();
+            let dst: &mut [[f32; 3]] = bytemuck::cast_slice_mut(&mut mapped);
+            debug_assert_eq!(dst.len(), n);
+            write_shifted(dst, positions, origin);
+        }
+        vertex_buffer.unmap();
+    }
     GpuChunk {
         vertex_buffer,
-        vertex_count: positions.len() as u32,
+        vertex_count: n as u32,
+    }
+}
+
+fn write_shifted(dst: &mut [[f32; 3]], src: &[[f32; 3]], origin: Vec3) {
+    let ox = origin.x;
+    let oy = origin.y;
+    let oz = origin.z;
+    if src.len() >= PAR_VERTS {
+        dst.par_iter_mut()
+            .zip(src.par_iter())
+            .for_each(|(d, p)| *d = [p[0] - ox, p[1] - oy, p[2] - oz]);
+    } else {
+        for (d, p) in dst.iter_mut().zip(src) {
+            *d = [p[0] - ox, p[1] - oy, p[2] - oz];
+        }
     }
 }
 
@@ -211,11 +240,7 @@ impl Renderer {
     /// オフスクリーンカラーを egui に登録または更新する。
     ///
     /// [`Self::resize`] のあと、描画の前に必ず呼ぶ。未登録なら新規 ID、既存なら中身だけ差し替える。
-    pub fn sync_egui_tex(
-        &mut self,
-        device: &wgpu::Device,
-        renderer: &mut egui_wgpu::Renderer,
-    ) {
+    pub fn sync_egui_tex(&mut self, device: &wgpu::Device, renderer: &mut egui_wgpu::Renderer) {
         match self.egui_tex {
             Some(id) => {
                 renderer.update_egui_texture_from_wgpu_texture(
@@ -307,10 +332,7 @@ impl Renderer {
             });
             if let Some(scene) = scene {
                 if scene.chunks.iter().any(|c| c.vertex_count > 0)
-                    || scene
-                        .proxy
-                        .as_ref()
-                        .is_some_and(|p| p.vertex_count > 0)
+                    || scene.proxy.as_ref().is_some_and(|p| p.vertex_count > 0)
                 {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_bind_group(0, &self.bind_group, &[]);
@@ -363,4 +385,3 @@ fn make_targets(
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
     (color, color_view, depth, depth_view)
 }
-

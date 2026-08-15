@@ -23,7 +23,15 @@ ASCII NAS は同じ幾何でも STL の数倍〜十数倍のバイトになる�
 
 日々の開発は smoke（tiny/small）でよい。C-lite の判定は **happy_subdiv1 と lucy** が必須。負荷試験マイルストーンで定数 200 万を動かす。
 
-計測ハーネス（`--bench` やログ）はビューア実装後。方針だけ先に固定し、データは先に揃える。
+### パース比較（STL）
+
+C-lite ハーネスとは別に、パース・スープ化・GPU 載せを `stl_io` と並べて測る。時間に加え、ベンチ専用アロケータで CPU 割り当てのピークと合計も出す（VRAM / mmap は含まれない）。
+
+```text
+cargo bench --bench stl_parse
+```
+
+結果・測り方・妥当性の限界は [stl_parse.md](stl_parse.md)。C-lite の T_proxy 以降はまだ後段。
 
 ## 手元のソース（PLY）
 
@@ -114,5 +122,5 @@ PLY が無いとき: 上の Stanford のページから `bunny` / `happy_recon` 
 
 ## git
 
-追跡する: `bench/scripts/`、`bench/requirements.txt`、`bench/**/README*`、このファイル。
+追跡する: `bench/scripts/`、`bench/requirements.txt`、`bench/**/README*`、`bench/stl_parse.md`、このファイル。
 追跡しない: `*.ply` `*.stl` `*.nas`、`derived/`、`local/`、`.venv/`。

@@ -182,9 +182,9 @@ fn vert_has_front_face(view: Mat4, i: usize) -> bool {
 }
 
 fn edge_has_front_face(view: Mat4, i: usize, j: usize) -> bool {
-    (0..3).filter(|axis| (i ^ j) & (1 << axis) == 0).any(|axis| {
-        facing_camera(view, axis_normal(axis, i & (1 << axis) != 0))
-    })
+    (0..3)
+        .filter(|axis| (i ^ j) & (1 << axis) == 0)
+        .any(|axis| facing_camera(view, axis_normal(axis, i & (1 << axis) != 0)))
 }
 
 fn mix_hover(c: Color32) -> Color32 {
@@ -301,7 +301,9 @@ pub fn pick(view: Mat4, viewport: Rect, pointer: Pos2) -> Option<CubePick> {
 /// let hover = view_cube::paint(ui, rect, view);
 /// ```
 pub fn paint(ui: &egui::Ui, viewport: Rect, view: Mat4) -> Option<CubePick> {
-    let hover = ui.input(|i| i.pointer.hover_pos()).and_then(|p| pick(view, viewport, p));
+    let hover = ui
+        .input(|i| i.pointer.hover_pos())
+        .and_then(|p| pick(view, viewport, p));
     if hover.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }

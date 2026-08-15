@@ -131,7 +131,7 @@ impl MeshpadApp {
     }
 }
 
-// mmap・パース・再中心化までの時間。GPU アップロードは含めない。
+// mmap・パース・AABB までの時間。GPU アップロードは含めない。
 fn format_load_status(triangles: usize, load_ms: f64) -> String {
     if load_ms < 10.0 {
         format!("{triangles} triangles  {load_ms:.1}ms")
@@ -242,7 +242,8 @@ impl eframe::App for MeshpadApp {
                     || response.dragged_by(PointerButton::Middle);
                 if orbiting {
                     self.tween = None;
-                    self.camera.rotate(Vec2::new(response.drag_delta().x, response.drag_delta().y));
+                    self.camera
+                        .rotate(Vec2::new(response.drag_delta().x, response.drag_delta().y));
                 }
                 if panning {
                     self.tween = None;

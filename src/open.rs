@@ -255,8 +255,7 @@ mod tests {
     fn same_folder_twice_is_not_duplicated() {
         with_temp(|dir| {
             touch(&dir.join("part.stl"));
-            let (files, warnings) =
-                expand_open_inputs(&[dir.to_path_buf(), dir.to_path_buf()]);
+            let (files, warnings) = expand_open_inputs(&[dir.to_path_buf(), dir.to_path_buf()]);
             assert!(warnings.is_empty());
             assert_eq!(files.len(), 1);
         });
