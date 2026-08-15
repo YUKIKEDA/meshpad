@@ -34,7 +34,7 @@ impl Default for Camera {
     fn default() -> Self {
         Self {
             target: Vec3::ZERO,
-            orientation: orientation_looking_from(Vec3::new(1.0, 1.0, 1.0)),
+            orientation: orientation_looking_from(Vec3::new(1.0, 1.0, 1.0), Vec3::Z),
             distance: 4.0,
             half_height: 1.0,
             fit_radius: 1.0,
@@ -59,13 +59,74 @@ fn preferred_up(dir: Vec3) -> Vec3 {
     }
 }
 
-/// `dir` 方向から原点を見る姿勢。面スナップでは可能な限り世界 Z を画面上向きにする。
-fn orientation_looking_from(dir: Vec3) -> Quat {
+/// 画面上向きにいちばん近い符号付き世界軸。
+pub fn nearest_up_axis(screen_up: Vec3) -> Vec3 {
+    let h = screen_up.normalize_or_zero();
+    if h.length_squared() < 0.5 {
+        return Vec3::Z;
+    }
+    let mut best = Vec3::Z;
+    let mut best_mag = -1.0_f32;
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        let along = h.dot(axis);
+        let mag = along.abs();
+        if mag > best_mag + 1e-4 {
+            best_mag = mag;
+            best = if mag < 1e-6 {
+                axis
+            } else {
+                axis * along.signum()
+            };
+        }
+    }
+    if best_mag < 1e-6 {
+        Vec3::Z
+    } else {
+        best
+    }
+}
+
+/// いま画面の上にあるキューブ面の軸。その軸まわりにヨーする。
+///
+/// +Y が上の面なら Y。視線と平行な面しか無いときは [`nearest_up_axis`]。
+pub fn cube_snap_up(view_dir: Vec3, screen_up: Vec3) -> Vec3 {
+    let view = view_dir.normalize_or_zero();
+    let up = screen_up.normalize_or_zero();
+    let mut best: Option<(f32, Vec3)> = None;
+    for axis in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+        if view.dot(axis) <= 0.02 {
+            continue;
+        }
+        let height = up.dot(axis);
+        let better = best.map(|(h, _)| height > h + 1e-4).unwrap_or(true);
+        if better {
+            best = Some((height, axis));
+        }
+    }
+    if let Some((_, axis)) = best {
+        if view.cross(axis).length_squared() > 1e-4 {
+            return axis;
+        }
+    }
+    nearest_up_axis(up)
+}
+
+/// `dir` 方向から原点を見る姿勢。
+///
+/// ±Z（真上・真下）は世界 Y を画面上向きにする。それ以外は `hint_up` を画面垂直に保つ。
+fn orientation_looking_from(dir: Vec3, hint_up: Vec3) -> Quat {
     let dir = dir.normalize_or_zero();
     if dir.length_squared() < 0.5 {
         return Quat::IDENTITY;
     }
-    let mut up = preferred_up(dir);
+    let hint = hint_up.normalize_or_zero();
+    let mut up = if dir.z.abs() > 0.9 {
+        preferred_up(dir)
+    } else if hint.length_squared() > 0.5 && dir.cross(hint).length_squared() > 1e-4 {
+        hint
+    } else {
+        preferred_up(dir)
+    };
     let f = -dir;
     let mut s = f.cross(up);
     if s.length_squared() < 1e-8 {
@@ -104,6 +165,7 @@ impl Camera {
     /// 指定方向から原点を見る姿勢に切り替え、続けて全体フィットする。
     ///
     /// ビューキューブの面・辺・頂点クリック用。`dir` はカメラが座る世界方向。
+    /// 頂点は角の等角。画面上向きは、いま上にあるキューブ面の軸。
     /// 画面上の動きは [`CameraTween`] が短い時間で補間する。この関数自体は最終姿勢を即時に入れる。
     ///
     /// # Examples
@@ -119,7 +181,8 @@ impl Camera {
 
     /// 指定方向から原点を見る。
     ///
-    /// ズームと注視点は変えない。真上・真下（±Z）では画面 up に世界 Y を使う。
+    /// ズームと注視点は変えない。世界 Z を画面上向きにする。
+    /// 真上・真下（±Z）だけは世界 Y を画面上向きにする。
     ///
     /// # Examples
     ///
@@ -128,7 +191,21 @@ impl Camera {
     /// cam.look_from(glam::Vec3::X);
     /// ```
     pub fn look_from(&mut self, dir: Vec3) {
-        self.orientation = orientation_looking_from(dir);
+        self.look_from_up(dir, Vec3::Z);
+    }
+
+    /// 指定方向から原点を見る。`hint_up` を画面垂直に保つ。
+    ///
+    /// 視線と平行なときは [`look_from`] と同じフォールバック。
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let mut cam = Camera::default();
+    /// cam.look_from_up(glam::Vec3::X, glam::Vec3::Y);
+    /// ```
+    pub fn look_from_up(&mut self, dir: Vec3, hint_up: Vec3) {
+        self.orientation = orientation_looking_from(dir, hint_up);
     }
 
     /// 画面ピクセルのドラッグ量で、カメラの up / right まわりに回す。
@@ -400,6 +477,113 @@ mod tests {
         assert!((dir - Vec3::Z).length() < 1e-3);
         assert!(covers_radius(&cam, 4.0, 1.0));
         assert!(cam.target.length() < 1e-5);
+    }
+
+    #[test]
+    fn y_up_top_view_vertex_is_iso_keeping_y_unrolled() {
+        let mut cam = Camera::default();
+        cam.look_from(Vec3::Z);
+        let up = cube_snap_up(cam.eye_offset(), cam.orientation * Vec3::Y);
+        assert!((up - Vec3::Y).length() < 1e-4);
+        let dir = Vec3::new(1.0, 1.0, 1.0).normalize();
+        assert!(dir.x > 0.4 && dir.y > 0.4 && dir.z > 0.4);
+        cam.look_from_up(dir, up);
+        let eye = cam.eye_offset().normalize();
+        assert!(
+            eye.x > 0.4 && eye.y > 0.4 && eye.z > 0.4,
+            "iso elevation; eye={eye:?}"
+        );
+        let right = (cam.orientation * Vec3::X).normalize();
+        assert!(
+            right.dot(Vec3::Y).abs() < 1e-3,
+            "Y-up iso should not roll; right={right:?}"
+        );
+    }
+
+    #[test]
+    fn z_up_side_view_vertex_is_iso_keeping_z_unrolled() {
+        let mut cam = Camera::default();
+        cam.look_from_up(Vec3::X, Vec3::Z);
+        let up = cube_snap_up(cam.eye_offset(), cam.orientation * Vec3::Y);
+        assert!((up - Vec3::Z).length() < 1e-4);
+        let dir = Vec3::new(1.0, 1.0, 1.0).normalize();
+        cam.look_from_up(dir, up);
+        let eye = cam.eye_offset().normalize();
+        assert!(
+            eye.x > 0.4 && eye.y > 0.4 && eye.z > 0.4,
+            "iso elevation; eye={eye:?}"
+        );
+        let right = (cam.orientation * Vec3::X).normalize();
+        assert!(
+            right.dot(Vec3::Z).abs() < 1e-3,
+            "Z-up iso should keep Z screen-vertical; right={right:?}"
+        );
+    }
+
+    #[test]
+    fn yz_edge_vertex_keeps_y_face_as_roof() {
+        let mut cam = Camera::default();
+        cam.look_from_up(Vec3::new(0.0, 1.0, -1.0), Vec3::Z);
+        let up = cube_snap_up(cam.eye_offset(), cam.orientation * Vec3::Y);
+        assert!(up.dot(Vec3::Y) > 0.99, "top visible face is +Y; up={up:?}");
+        cam.look_from_up(Vec3::new(-1.0, 1.0, -1.0).normalize(), up);
+        let eye = cam.eye_offset().normalize();
+        assert!(
+            eye.x < -0.4 && eye.y > 0.4 && eye.z < -0.4,
+            "iso; eye={eye:?}"
+        );
+        let right = (cam.orientation * Vec3::X).normalize();
+        assert!(
+            right.dot(Vec3::Y).abs() < 1e-3,
+            "Y-up iso must not roll toward Z; right={right:?}"
+        );
+    }
+
+    #[test]
+    fn yz_edge_yx_ridge_stays_y_up_stacked() {
+        let mut cam = Camera::default();
+        cam.look_from_up(Vec3::new(0.0, 1.0, -1.0), Vec3::Z);
+        let up = cube_snap_up(cam.eye_offset(), cam.orientation * Vec3::Y);
+        cam.look_from_up(Vec3::new(-1.0, 1.0, 0.0), up);
+        let right = (cam.orientation * Vec3::X).normalize();
+        assert!(
+            right.dot(Vec3::Z).abs() > 0.9,
+            "YX edge with Y-up is stacked; Z is screen-horizontal; right={right:?}"
+        );
+        let screen_up = (cam.orientation * Vec3::Y).normalize();
+        assert!(
+            screen_up.dot(Vec3::new(1.0, 1.0, 0.0).normalize()) > 0.9
+                || screen_up.dot(Vec3::Y) > 0.5,
+            "Y stays toward screen-up; up={screen_up:?}"
+        );
+    }
+
+    #[test]
+    fn snap_from_x_face_keeps_z_as_screen_up() {
+        let mut cam = Camera::default();
+        cam.orientation = Quat::from_mat3(&Mat3::from_cols(Vec3::Y, Vec3::Z, Vec3::X));
+        cam.look_from(Vec3::new(1.0, 0.0, -1.0));
+        let dir = cam.eye_offset().normalize();
+        assert!(
+            dir.y.abs() < 1e-3,
+            "ZX edge view should sit in the ZX plane"
+        );
+        let right = (cam.orientation * Vec3::X).normalize();
+        assert!(
+            right.dot(Vec3::Z).abs() < 1e-3,
+            "ZX edge should be screen-horizontal; right={right:?}"
+        );
+    }
+
+    #[test]
+    fn zx_edge_view_has_level_horizon() {
+        let mut cam = Camera::default();
+        cam.look_from(Vec3::new(-1.0, 0.0, -1.0));
+        let up = (cam.orientation * Vec3::Y).normalize();
+        assert!(up.dot(Vec3::Z) > 0.7);
+        let right = (cam.orientation * Vec3::X).normalize();
+        assert!(right.dot(Vec3::Z).abs() < 1e-3);
+        assert!(right.y.abs() > 0.7, "looking in ZX, screen-right is ±Y");
     }
 
     #[test]

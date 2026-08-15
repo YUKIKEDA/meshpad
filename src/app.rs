@@ -6,18 +6,19 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use eframe::egui::{self, Color32, PointerButton, RichText, Sense};
+use eframe::egui::{self, Color32, PointerButton, RichText, Sense, Stroke, ViewportCommand};
 use glam::Vec2;
 
 use crate::camera::{Camera, CameraTween};
 use crate::gpu::{Renderer, SceneGpu};
+use crate::icon;
 use crate::load;
 use crate::open;
 use crate::view_cube;
 
 /// Meshpad のウィンドウ本体。
 ///
-/// 細いファイルメニューとステータス、ビュー全面の 3D を持つ。
+/// ウィンドウ枠に File メニュー、下のステータス、ビュー全面の 3D を持つ。
 pub struct MeshpadApp {
     renderer: Renderer,
     scene: Option<SceneGpu>,
@@ -28,6 +29,7 @@ pub struct MeshpadApp {
     status: String,
     warnings: Vec<String>,
     title_file: Option<String>,
+    title_icon: egui::TextureHandle,
 }
 
 impl MeshpadApp {
@@ -58,6 +60,11 @@ impl MeshpadApp {
             status: String::new(),
             warnings: Vec::new(),
             title_file: None,
+            title_icon: cc.egui_ctx.load_texture(
+                "meshpad_icon",
+                icon::title_color_image(),
+                egui::TextureOptions::NEAREST,
+            ),
         };
         if !initial_paths.is_empty() {
             app.open_paths(&rs.device, &initial_paths);
@@ -157,38 +164,295 @@ fn hover_dropping(ctx: &egui::Context) -> bool {
     ctx.input(|i| !i.raw.hovered_files.is_empty())
 }
 
-impl eframe::App for MeshpadApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let title = match &self.title_file {
-            Some(f) => format!("Meshpad - {f}"),
-            None => "Meshpad".into(),
-        };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+const TITLE_H: f32 = 32.0;
+const RESIZE_PAD: f32 = 5.0;
+const CAPTION_W: f32 = 46.0;
 
-        let mut want_open =
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O));
+fn title_bar(ctx: &egui::Context, want_open: &mut bool, title_icon: &egui::TextureHandle) {
+    egui::TopBottomPanel::top("title")
+        .exact_height(TITLE_H)
+        .frame(
+            egui::Frame::NONE
+                .fill(Color32::from_rgb(22, 22, 24))
+                .inner_margin(egui::Margin::ZERO),
+        )
+        .show(ctx, |ui| {
+            let bar = ui.max_rect();
+            let btn_band = bar.with_min_x(bar.right() - CAPTION_W * 3.0);
+            let drag_rect = bar
+                .with_min_x(bar.left() + 210.0)
+                .with_max_x(btn_band.left());
+            let drag = ui.interact(
+                drag_rect,
+                egui::Id::new("title_drag"),
+                Sense::click_and_drag(),
+            );
+            if drag.double_clicked() {
+                let maxed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                ui.ctx()
+                    .send_viewport_cmd(ViewportCommand::Maximized(!maxed));
+            }
+            if drag.drag_started_by(PointerButton::Primary) {
+                ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+            }
 
-        egui::TopBottomPanel::top("bar")
-            .exact_height(28.0)
-            .frame(
-                egui::Frame::NONE
-                    .fill(Color32::from_rgb(22, 22, 24))
-                    .inner_margin(egui::Margin::symmetric(10, 4)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(bar)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    ui.add_space(10.0);
+                    paint_app_mark(ui, title_icon);
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Meshpad").color(Color32::from_gray(210)));
+                    ui.add_space(6.0);
                     ui.menu_button("File", |ui| {
                         if ui.button("Open...    Ctrl+O").clicked() {
                             ui.close();
-                            want_open = true;
+                            *want_open = true;
                         }
                     });
+                },
+            );
+
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(bar)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    window_buttons(ui);
+                },
+            );
+        });
+}
+
+fn paint_app_mark(ui: &mut egui::Ui, icon: &egui::TextureHandle) {
+    ui.add(
+        egui::Image::new(icon)
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
+            .sense(Sense::hover()),
+    );
+}
+
+fn window_buttons(ui: &mut egui::Ui) {
+    let h = TITLE_H;
+    let w = CAPTION_W;
+    let close = caption_btn(ui, CaptionIcon::Close, w, h, Color32::from_rgb(196, 43, 28));
+    if close.clicked() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+    }
+    let maxed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+    let max_kind = if maxed {
+        CaptionIcon::Restore
+    } else {
+        CaptionIcon::Maximize
+    };
+    let maximize = caption_btn(ui, max_kind, w, h, Color32::from_rgb(52, 52, 54));
+    if maximize.clicked() {
+        ui.ctx()
+            .send_viewport_cmd(ViewportCommand::Maximized(!maxed));
+    }
+    let minimize = caption_btn(
+        ui,
+        CaptionIcon::Minimize,
+        w,
+        h,
+        Color32::from_rgb(52, 52, 54),
+    );
+    if minimize.clicked() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CaptionIcon {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+fn caption_btn(
+    ui: &mut egui::Ui,
+    kind: CaptionIcon,
+    w: f32,
+    h: f32,
+    hover: Color32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, h), Sense::click());
+    let close = matches!(kind, CaptionIcon::Close);
+    let fill = if response.hovered() {
+        hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 0.0, fill);
+    let fg = if response.hovered() && close {
+        Color32::WHITE
+    } else {
+        Color32::from_gray(220)
+    };
+    paint_caption_icon(ui.painter(), rect, kind, fg);
+    response
+}
+
+fn paint_caption_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    kind: CaptionIcon,
+    color: Color32,
+) {
+    let ppp = painter.ctx().pixels_per_point();
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let c = egui::pos2(snap(rect.center().x), snap(rect.center().y));
+    let stroke = Stroke::new(1.0_f32, color);
+    match kind {
+        CaptionIcon::Minimize => {
+            let w = 10.0;
+            painter.line_segment(
+                [
+                    egui::pos2(snap(c.x - w * 0.5), c.y),
+                    egui::pos2(snap(c.x + w * 0.5), c.y),
+                ],
+                stroke,
+            );
+        }
+        CaptionIcon::Maximize => {
+            let s = 10.0;
+            let r = egui::Rect::from_min_size(
+                egui::pos2(snap(c.x - s * 0.5), snap(c.y - s * 0.5)),
+                egui::vec2(s, s),
+            );
+            painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+        }
+        CaptionIcon::Restore => {
+            let s = 8.0;
+            let back = egui::Rect::from_min_size(
+                egui::pos2(snap(c.x - 2.0), snap(c.y - 5.0)),
+                egui::vec2(s, s),
+            );
+            let front = egui::Rect::from_min_size(
+                egui::pos2(snap(c.x - 5.0), snap(c.y - 2.0)),
+                egui::vec2(s, s),
+            );
+            painter.rect_stroke(back, 0.0, stroke, egui::StrokeKind::Inside);
+            painter.rect_filled(front, 0.0, Color32::from_rgb(22, 22, 24));
+            painter.rect_stroke(front, 0.0, stroke, egui::StrokeKind::Inside);
+        }
+        CaptionIcon::Close => {
+            let s = 5.0;
+            painter.line_segment(
+                [
+                    egui::pos2(snap(c.x - s), snap(c.y - s)),
+                    egui::pos2(snap(c.x + s), snap(c.y + s)),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(snap(c.x + s), snap(c.y - s)),
+                    egui::pos2(snap(c.x - s), snap(c.y + s)),
+                ],
+                stroke,
+            );
+        }
+    }
+}
+
+fn caption_btn_band(screen: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(screen.right() - CAPTION_W * 3.0, screen.top()),
+        egui::pos2(screen.right(), screen.top() + TITLE_H),
+    )
+}
+
+fn resize_dir_at(screen: egui::Rect, pos: egui::Pos2) -> Option<egui::viewport::ResizeDirection> {
+    if caption_btn_band(screen).contains(pos) {
+        return None;
+    }
+    let l = pos.x - screen.left() <= RESIZE_PAD;
+    let r = screen.right() - pos.x <= RESIZE_PAD;
+    let t = pos.y - screen.top() <= RESIZE_PAD;
+    let b = screen.bottom() - pos.y <= RESIZE_PAD;
+    match (l, r, t, b) {
+        (true, false, true, false) => Some(egui::viewport::ResizeDirection::NorthWest),
+        (false, true, true, false) => Some(egui::viewport::ResizeDirection::NorthEast),
+        (true, false, false, true) => Some(egui::viewport::ResizeDirection::SouthWest),
+        (false, true, false, true) => Some(egui::viewport::ResizeDirection::SouthEast),
+        (true, false, false, false) => Some(egui::viewport::ResizeDirection::West),
+        (false, true, false, false) => Some(egui::viewport::ResizeDirection::East),
+        (false, false, true, false) => Some(egui::viewport::ResizeDirection::North),
+        (false, false, false, true) => Some(egui::viewport::ResizeDirection::South),
+        _ => None,
+    }
+}
+
+fn window_resize_borders(ctx: &egui::Context) {
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+        return;
+    }
+    let Some(pos) = ctx.pointer_latest_pos() else {
+        return;
+    };
+    let Some(dir) = resize_dir_at(ctx.screen_rect(), pos) else {
+        return;
+    };
+    ctx.set_cursor_icon(match dir {
+        egui::viewport::ResizeDirection::North | egui::viewport::ResizeDirection::South => {
+            egui::CursorIcon::ResizeVertical
+        }
+        egui::viewport::ResizeDirection::East | egui::viewport::ResizeDirection::West => {
+            egui::CursorIcon::ResizeHorizontal
+        }
+        egui::viewport::ResizeDirection::NorthEast | egui::viewport::ResizeDirection::SouthWest => {
+            egui::CursorIcon::ResizeNeSw
+        }
+        egui::viewport::ResizeDirection::NorthWest | egui::viewport::ResizeDirection::SouthEast => {
+            egui::CursorIcon::ResizeNwSe
+        }
+    });
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+    }
+}
+
+impl eframe::App for MeshpadApp {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title("Meshpad".into()));
+        window_resize_borders(ctx);
+
+        let mut want_open =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O));
+        title_bar(ctx, &mut want_open, &self.title_icon);
+
+        egui::TopBottomPanel::bottom("status")
+            .exact_height(22.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(Color32::from_rgb(18, 18, 20))
+                    .inner_margin(egui::Margin::symmetric(10, 0)),
+            )
+            .show(ctx, |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let mut need_sep = false;
+                    if let Some(name) = &self.title_file {
+                        ui.label(RichText::new(name).color(Color32::from_gray(200)));
+                        need_sep = true;
+                    }
                     if !self.status.is_empty() {
-                        ui.separator();
+                        if need_sep {
+                            ui.separator();
+                        }
                         ui.label(RichText::new(&self.status).color(Color32::from_gray(160)));
+                        need_sep = true;
                     }
                     for w in &self.warnings {
+                        if need_sep {
+                            ui.separator();
+                        }
                         ui.label(RichText::new(w).color(Color32::from_rgb(220, 160, 80)));
+                        need_sep = true;
                     }
                 });
             });
@@ -264,8 +528,13 @@ impl eframe::App for MeshpadApp {
                     if let Some(pos) = response.interact_pointer_pos() {
                         if let Some(hit) = view_cube::pick(view, rect, pos) {
                             if let Some(scene) = &self.scene {
+                                let screen_up = self.camera.orientation * glam::Vec3::Y;
+                                let view_dir = self.camera.eye_offset();
                                 let mut goal = self.camera.clone();
-                                goal.snap_and_fit(hit.dir, scene.radius, aspect);
+                                let dir = hit.snap_dir(view_dir, screen_up);
+                                let up = hit.snap_up(view_dir, screen_up);
+                                goal.look_from_up(dir, up);
+                                goal.fit(scene.radius, aspect);
                                 self.tween = CameraTween::toward(&self.camera, &goal);
                                 if self.tween.is_none() {
                                     self.camera = goal;
@@ -340,5 +609,41 @@ impl eframe::App for MeshpadApp {
                     );
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::viewport::ResizeDirection;
+
+    fn win() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0))
+    }
+
+    #[test]
+    fn caption_buttons_are_not_resize_handles() {
+        let screen = win();
+        let y = 2.0;
+        let close = egui::pos2(screen.right() - 2.0, y);
+        let maximize = egui::pos2(screen.right() - CAPTION_W - 2.0, y);
+        let minimize = egui::pos2(screen.right() - CAPTION_W * 2.0 - 2.0, y);
+        assert_eq!(resize_dir_at(screen, close), None);
+        assert_eq!(resize_dir_at(screen, maximize), None);
+        assert_eq!(resize_dir_at(screen, minimize), None);
+    }
+
+    #[test]
+    fn east_resize_still_works_below_the_title_bar() {
+        let screen = win();
+        let pos = egui::pos2(screen.right() - 2.0, TITLE_H + 40.0);
+        assert_eq!(resize_dir_at(screen, pos), Some(ResizeDirection::East));
+    }
+
+    #[test]
+    fn north_resize_still_works_left_of_caption_buttons() {
+        let screen = win();
+        let pos = egui::pos2(400.0, 2.0);
+        assert_eq!(resize_dir_at(screen, pos), Some(ResizeDirection::North));
     }
 }

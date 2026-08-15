@@ -1,8 +1,9 @@
 //! 画面隅のビューキューブ。
 //!
-//! 面・辺・頂点をクリックして軸直交または等角の向きへスナップする。
+//! 面は軸直交、辺は二等分、頂点は等角。上向きはいま上にある面の軸。
 //! 描画は egui の 2D、回転はシーンのビュー行列の線形部分だけを使う。
 
+use crate::camera::cube_snap_up;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use glam::{Mat4, Vec3};
 
@@ -16,12 +17,24 @@ const EDGE_HIT: f32 = 8.0;
 
 /// ビューキューブ上で選んだ面・辺・頂点。
 ///
-/// `dir` は注視点からカメラが座る位置へ向かう。面は軸方向、辺と頂点は等角。
+/// `dir` は注視点からカメラが座る位置へ向かう。面は軸方向、辺は二等分、頂点は等角。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CubePick {
     /// 注視点からカメラへ向かう単位ベクトル。
     pub dir: Vec3,
     kind: PickKind,
+}
+
+impl CubePick {
+    /// カメラが座る方向。頂点は角の等角（仰角を落とさない）。
+    pub fn snap_dir(self, _view_dir: Vec3, _screen_up: Vec3) -> Vec3 {
+        self.dir
+    }
+
+    /// スナップ後に保つ上向き。いま画面の上にあるキューブ面の軸。
+    pub fn snap_up(self, view_dir: Vec3, screen_up: Vec3) -> Vec3 {
+        cube_snap_up(view_dir, screen_up)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,6 +448,8 @@ mod tests {
         let hit = pick(view, viewport, p).expect("corner");
         assert_eq!(hit.kind, PickKind::Corner);
         assert!(hit.dir.x > 0.4 && hit.dir.y > 0.4 && hit.dir.z > 0.4);
+        let snap = hit.snap_dir(Vec3::Z, Vec3::Y);
+        assert!(snap.x > 0.4 && snap.y > 0.4 && snap.z > 0.4);
     }
 
     #[test]
