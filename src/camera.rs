@@ -28,6 +28,8 @@ pub struct Camera {
     pub half_height: f32,
     /// 最後にフィットした外接半径。ズーム上限と `F` に使う。
     pub fit_radius: f32,
+    /// 世界の上向き。`false` なら +Z（既定）、`true` なら +Y。
+    pub y_up: bool,
 }
 
 impl Default for Camera {
@@ -38,6 +40,7 @@ impl Default for Camera {
             distance: 4.0,
             half_height: 1.0,
             fit_radius: 1.0,
+            y_up: false,
         }
     }
 }
@@ -113,19 +116,21 @@ pub fn cube_snap_up(view_dir: Vec3, screen_up: Vec3) -> Vec3 {
 
 /// `dir` 方向から原点を見る姿勢。
 ///
-/// ±Z（真上・真下）は世界 Y を画面上向きにする。それ以外は `hint_up` を画面垂直に保つ。
+/// `hint_up` が視線と十分に直交していればそれを画面上向きにする。
+/// 視線が `hint_up` とほぼ平行（ポール）なら、もう一方の世界軸へ退避する。
 fn orientation_looking_from(dir: Vec3, hint_up: Vec3) -> Quat {
     let dir = dir.normalize_or_zero();
     if dir.length_squared() < 0.5 {
         return Quat::IDENTITY;
     }
     let hint = hint_up.normalize_or_zero();
-    let mut up = if dir.z.abs() > 0.9 {
-        preferred_up(dir)
-    } else if hint.length_squared() > 0.5 && dir.cross(hint).length_squared() > 1e-4 {
+    let along_hint = hint.length_squared() > 0.5 && dir.dot(hint).abs() > 0.9;
+    let hint_usable =
+        hint.length_squared() > 0.5 && dir.cross(hint).length_squared() > 1e-4 && !along_hint;
+    let mut up = if hint_usable {
         hint
     } else {
-        preferred_up(dir)
+        pole_fallback(dir, hint)
     };
     let f = -dir;
     let mut s = f.cross(up);
@@ -140,6 +145,18 @@ fn orientation_looking_from(dir: Vec3, hint_up: Vec3) -> Quat {
     let s = s.normalize_or_zero();
     let u = s.cross(f).normalize_or_zero();
     Quat::from_mat3(&Mat3::from_cols(s, u, dir))
+}
+
+fn pole_fallback(dir: Vec3, hint: Vec3) -> Vec3 {
+    if hint.length_squared() > 0.5 && dir.dot(hint.normalize_or_zero()).abs() > 0.9 {
+        if hint.normalize_or_zero().dot(Vec3::Y).abs() > 0.9 {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        }
+    } else {
+        preferred_up(dir)
+    }
 }
 
 impl Camera {
@@ -179,10 +196,19 @@ impl Camera {
         self.fit(radius, aspect);
     }
 
+    /// 世界の上向き（[`Self::y_up`]）。
+    pub fn world_up(&self) -> Vec3 {
+        if self.y_up {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        }
+    }
+
     /// 指定方向から原点を見る。
     ///
-    /// ズームと注視点は変えない。世界 Z を画面上向きにする。
-    /// 真上・真下（±Z）だけは世界 Y を画面上向きにする。
+    /// ズームと注視点は変えない。[`Self::world_up`] を画面上向きにする。
+    /// 視線がそれと平行なときだけ、もう一方の軸を画面上向きにする。
     ///
     /// # Examples
     ///
@@ -191,7 +217,13 @@ impl Camera {
     /// cam.look_from(glam::Vec3::X);
     /// ```
     pub fn look_from(&mut self, dir: Vec3) {
-        self.look_from_up(dir, Vec3::Z);
+        self.look_from_up(dir, self.world_up());
+    }
+
+    /// 視線方向は保ち、[`Self::world_up`] が画面上に来るよう姿勢だけ入れ直す。
+    pub fn apply_world_up(&mut self) {
+        let dir = self.eye_offset();
+        self.look_from(dir);
     }
 
     /// 指定方向から原点を見る。`hint_up` を画面垂直に保つ。
@@ -456,6 +488,47 @@ mod tests {
         cam.look_from(Vec3::X);
         let dir = cam.eye_offset().normalize();
         assert!((dir - Vec3::X).length() < 1e-4);
+    }
+
+    #[test]
+    fn y_up_look_from_x_aligns_y_with_screen_up() {
+        let mut cam = Camera::default();
+        cam.distance = 1.0;
+        cam.look_from(Vec3::X);
+        assert!((cam.orientation * Vec3::Y).dot(Vec3::Z) > 0.99);
+        cam.y_up = true;
+        cam.apply_world_up();
+        assert!((cam.eye_offset().normalize() - Vec3::X).length() < 1e-3);
+        assert!((cam.orientation * Vec3::Y).dot(Vec3::Y) > 0.99);
+    }
+
+    #[test]
+    fn y_up_look_from_y_falls_back_off_the_pole() {
+        let mut cam = Camera::default();
+        cam.distance = 1.0;
+        cam.y_up = true;
+        cam.look_from(Vec3::Y);
+        assert!((cam.eye_offset().normalize() - Vec3::Y).length() < 1e-3);
+        let screen_up = (cam.orientation * Vec3::Y).normalize();
+        assert!(
+            screen_up.dot(Vec3::Y).abs() < 0.2,
+            "world Y is the view dir; screen up={screen_up:?}"
+        );
+        assert!(screen_up.dot(Vec3::Z).abs() > 0.99);
+    }
+
+    #[test]
+    fn y_up_near_y_pole_falls_back() {
+        let mut cam = Camera::default();
+        cam.distance = 1.0;
+        cam.y_up = true;
+        cam.look_from(Vec3::new(0.12, 1.0, 0.05).normalize());
+        let screen_up = (cam.orientation * Vec3::Y).normalize();
+        assert!(
+            screen_up.dot(Vec3::Y).abs() < 0.5,
+            "near +Y, world Y cannot be screen up; up={screen_up:?}"
+        );
+        assert!(screen_up.dot(Vec3::Z).abs() > 0.8);
     }
 
     #[test]

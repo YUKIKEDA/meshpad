@@ -27,10 +27,12 @@ stl_io = "0.11"
 
 [[bench]]
 name = "stl_parse"
+path = "bench/stl_parse.rs"
 harness = false
 
 [[bench]]
 name = "nas_parse"
+path = "bench/nas_parse.rs"
 harness = false
 
 [profile.release]

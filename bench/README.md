@@ -1,47 +1,47 @@
 # Meshpad ベンチマーク方針
 
 実装に入る前の計測用データと、測るものの契約。Stanford の PLY は **ソース** であり、1.0 の入力形式ではない。
+データ、スクリプト、計測メモ、cargo ハーネスはすべて `bench/` に置く。
 変換結果と数 GB 級は git に載せない（`.gitignore`）。再生成はスクリプト。
 
 出典: [Stanford 3D Scanning Repository](http://graphics.stanford.edu/data/3Dscanrep/)（bunny / happy Buddha / lucy）。
 
-## 測るもの（1.0 の成功条件に合わせる）
+## 測るもの（1.0）
 
 比較の主軸は **ファイル MB ではなく三角形数（STL）／節点数＋要素数（NAS）**。
 ASCII NAS は同じ幾何でも STL の数倍〜十数倍のバイトになる。
 
-| 指標       | 意味                               | 合格の見方                               |
-| ---------- | ---------------------------------- | ---------------------------------------- |
-| T_proxy    | bbox＋粗いプロキシが出て回せるまで | 「メモ帳」の体感。初回走査完了を待たない |
-| T_index    | 空間索引が TEMP に載るまで         | 2 回目オープンの前提                     |
-| T_open2    | 同じファイルの再オープン           | TEMP キャッシュが効いていること          |
-| T_grid     | NAS で点群が出るまで               | STL には無い                             |
-| T_skin     | NAS 外皮がプロキシを置き換えるまで | 内部面がチラつかないこととセット         |
-| RSS / VRAM | プロセスと GPU 常駐                | 近景はシーン全体で約 200 万三角形        |
-| FPS        | プロキシのみ、および近景ロード後   | 操作中に落ちても表示は維持               |
-| T_refine   | 直交ズーム後に近景セルが載るまで   | 拡大に意味があることの計測               |
+| 指標       | 意味                         | 合格の見方                                      |
+| ---------- | ---------------------------- | ----------------------------------------------- |
+| T_parse    | mmap〜三角形スープ           | `stl_parse` / `nas_parse` の parse / soup       |
+| T_gpu      | GPU 載せ（全三角形）         | 同ベンチの gpu。巨大メッシュはチャンク分割込み  |
+| T_open     | 画面にメッシュが出て回せるまで | 製品は裏読み込み＋アップロード完了              |
+| RSS / VRAM | プロセスと GPU 常駐          | 全載せ。lucy 級はアダプタ上限＋複数チャンク     |
+| FPS        | 全三角形描画時               | 操作中に落ちても表示は維持                      |
 
-日々の開発は smoke（tiny/small）でよい。C-lite の判定は **happy_subdiv1 と lucy** が必須。負荷試験マイルストーンで定数 200 万を動かす。
+日々の開発は smoke（tiny/small）でよい。巨大経路の判定は **happy_subdiv1 と lucy**。
+
+後段（C-lite）の T_proxy / T_index / T_open2 / T_grid / T_skin / T_refine と近景 200 万は 1.0 では測らない。
 
 ### パース比較（STL）
 
-C-lite ハーネスとは別に、パース・スープ化・GPU 載せを `stl_io` と並べて測る。時間に加え、ベンチ専用アロケータで CPU 割り当てのピークと合計も出す（VRAM / mmap は含まれない）。
+パース・スープ化・GPU 載せを `stl_io` と並べて測る。ハーネスは同ディレクトリの `stl_parse.rs`。時間に加え、ベンチ専用アロケータで CPU 割り当てのピークと合計も出す（VRAM / mmap は含まれない）。
 
 ```text
 cargo bench --bench stl_parse
 ```
 
-結果・測り方・妥当性の限界は [stl_parse.md](stl_parse.md)。C-lite の T_proxy 以降はまだ後段。
+結果・測り方・妥当性の限界は [stl_parse.md](stl_parse.md)。
 
 ### パース比較（NAS）
 
-STL と同じハーネス形で、表面（`GRID`+`CTRIA3`）と体積（`CHEXA` / `CTETRA` の外皮）を測る。基準列は `bench/.venv` の pyNastran `read_bdf`（フル BDF。外皮は取らない）。
+STL と同じハーネス形で、表面（`GRID`+`CTRIA3`）と体積（`CHEXA` / `CTETRA` の外皮）を測る。ハーネスは同ディレクトリの `nas_parse.rs`。基準列は `bench/.venv` の pyNastran `read_bdf`（フル BDF。外皮は取らない）。
 
 ```text
 cargo bench --bench nas_parse
 ```
 
-結果・測り方は [nas_parse.md](nas_parse.md)。点群先行（T_grid）と TEMP 索引はまだ後段。
+結果・測り方は [nas_parse.md](nas_parse.md)。1.0 の製品経路は外皮まで一気に出す。点群先行は後段。
 
 ## 手元のソース（PLY）
 
@@ -69,7 +69,7 @@ ASCII STL は bunny/happy だけで足りる。`happy_subdiv1` と lucy の ASCI
 
 出力先: `bench/data/derived/`（git 対象外）。
 
-### STL（パーサ・C-lite）
+### STL（パーサ・全載せ）
 
 バイナリは `stl/`。ASCII は同じ幾何を `stl_ascii/` に置く（フォルダドロップで混ざらないように分ける）。
 
@@ -79,8 +79,8 @@ ASCII STL は bunny/happy だけで足りる。`happy_subdiv1` と lucy の ASCI
 | small    | `bunny.stl`             | 69k            | `stl/` ~3.5 MB | `stl_ascii/` ~13 MB  | チャンク 1 個の日常                      |
 | medium   | `happy_res2.stl`        | 293k           | `stl/` ~15 MB  | `stl_ascii/` ~56 MB  | 同上                                     |
 | large    | `happy.stl`             | 1.09M          | `stl/` ~54 MB  | `stl_ascii/` ~207 MB | 全載せ経路。ASCII の上限付近             |
-| heavy    | `stl/happy_subdiv1.stl` | ~4.4M          | ~220 MB        | 作らない             | 上限超過・C-lite 前半                    |
-| huge     | `stl/lucy.stl`          | 28.1M          | ~1.40 GB       | 作らない             | 初回走査中操作、TEMP、近景 200 万        |
+| heavy    | `stl/happy_subdiv1.stl` | ~4.4M          | ~220 MB        | 作らない             | 全載せ・複数チャンク                     |
+| huge     | `stl/lucy.stl`          | 28.1M          | ~1.40 GB       | 作らない             | 裏読み込み・VRAM・チャンク分割           |
 | optional | `--tile 2,1,1` on lucy  | 56M            | ~2.8 GB        | 作らない             | 数 GB 上限。ディスクに余裕があるときだけ |
 
 ### NAS は 2 系統（混ぜて評価しない）
@@ -90,7 +90,7 @@ ASCII STL は bunny/happy だけで足りる。`happy_subdiv1` と lucy の ASCI
 
 | 系統   | 作り方                              | 見るもの                                |
 | ------ | ----------------------------------- | --------------------------------------- |
-| 表面   | PLY → pyNastran `GRID`+`CTRIA3`     | フィールド形式、点群→面                 |
+| 表面   | PLY → pyNastran `GRID`+`CTRIA3`     | フィールド形式、表面シェル              |
 | 体積   | 格子 → pyNastran `CHEXA` / `CTETRA` | 外皮抽出。small-field の `CHEXA` 継続行 |
 | 実 CAE | `bench/data/local/`                 | 本番の揺れ                              |
 
@@ -132,5 +132,5 @@ PLY が無いとき: 上の Stanford のページから `bunny` / `happy_recon` 
 
 ## git
 
-追跡する: `bench/scripts/`、`bench/requirements.txt`、`bench/**/README*`、`bench/stl_parse.md`、`bench/nas_parse.md`、このファイル。
+追跡する: `bench/scripts/`、`bench/requirements.txt`、`bench/**/README*`、`bench/stl_parse.md`、`bench/nas_parse.md`、`bench/stl_parse.rs`、`bench/nas_parse.rs`、このファイル。
 追跡しない: `*.ply` `*.stl` `*.nas`、`derived/`、`local/`、`.venv/`。
