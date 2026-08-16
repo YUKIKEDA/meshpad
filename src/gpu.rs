@@ -1,20 +1,19 @@
 //! GPU 上のプロキシとチャンク。
 //!
-//! C-lite では粗いプロキシと近景セルを分ける。マイルストーン 1 ではチャンク 1 個に全三角形を載せ、プロキシは空のままにする。
+//! 頂点はファイル座標のまま載せる。AABB 中心は uniform の `origin` でシェーダが引く。
+//! 全三角形を載せる。1 バッファが [`wgpu::Limits::max_buffer_size`] を超えるときは複数チャンク。
+//! プロキシは空。
 
 use std::num::NonZeroU64;
 
 use eframe::egui_wgpu::{self, wgpu};
 use glam::Vec3;
-use rayon::prelude::*;
 
 use crate::camera::Camera;
 use crate::mesh::TriangleSoup;
 
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// これ以上の頂点数なら原点引きを Rayon で分割する。
-const PAR_VERTS: usize = 250_000 * 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -23,11 +22,11 @@ struct Uniforms {
     light_dir: [f32; 3],
     _pad0: f32,
     color: [f32; 4],
+    origin: [f32; 3],
+    _pad1: f32,
 }
 
 /// GPU 常駐の頂点ブロック。
-///
-/// C-lite では空間セル 1 つに相当する。マイルストーン 1 ではシーン全体が 1 チャンク。
 pub struct GpuChunk {
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
@@ -36,40 +35,60 @@ pub struct GpuChunk {
 /// 描画するシーン。
 ///
 /// 遠景の [`Self::proxy`] と近景の [`Self::chunks`] を分けて持てる。
-/// マイルストーン 1 では `proxy` は空、`chunks` は全三角形 1 本。
+/// `proxy` は空。`chunks` は全三角形（バッファ上限で分割することがある）。
 pub struct SceneGpu {
-    /// 元ファイル空間での AABB 中心。
-    ///
-    /// GPU 頂点はアップロード時にこれを引く。CPU のスープはファイル座標のまま。寸法表示を足すときに使う。
-    #[allow(dead_code)]
+    /// 元ファイル空間での AABB 中心。シェーダが頂点から引く。
     pub origin: Vec3,
-    /// シフト後メッシュの外接半径。カメラ距離の下限に使う。
+    /// ファイル空間 AABB の外接半径。カメラ距離の下限に使う。
     pub radius: f32,
     /// 遠景用の粗いメッシュ。無ければ `None`。
     pub proxy: Option<GpuChunk>,
-    /// 近景チャンク。マイルストーン 1 では要素 1 つの全メッシュ。
+    /// 全三角形。1 バッファに収まらなければ複数。
     pub chunks: Vec<GpuChunk>,
 }
 
 impl SceneGpu {
-    /// CPU のスープをチャンク 1 個としてアップロードする。
+    /// CPU のスープをすべてアップロードする。
     ///
-    /// プロキシは作らない。mapped バッファへ `positions - origin` を書く。
+    /// プロキシは作らない。頂点はファイル座標のまま。
+    /// 頂点バッファがデバイスの `max_buffer_size` を超えるときは三角形境界で分割する。
     ///
     /// # Examples
     ///
     /// ```ignore
     /// let scene = SceneGpu::from_soup(&device, &soup);
-    /// assert_eq!(scene.chunks.len(), 1);
+    /// assert!(!scene.chunks.is_empty());
     /// ```
     pub fn from_soup(device: &wgpu::Device, soup: &TriangleSoup) -> Self {
-        let chunk = upload_chunk(device, &soup.positions, soup.origin);
+        let cap = verts_per_chunk(device.limits().max_buffer_size);
+        let chunks = if soup.positions.is_empty() {
+            Vec::new()
+        } else {
+            soup.positions
+                .chunks(cap)
+                .map(|slice| upload_chunk(device, slice))
+                .collect()
+        };
         Self {
             origin: soup.origin,
             radius: soup.radius,
             proxy: None,
-            chunks: vec![chunk],
+            chunks,
         }
+    }
+
+    /// 原点と半径だけ先に作り、チャンクはあとから足す。
+    pub(crate) fn from_bounds(origin: Vec3, radius: f32) -> Self {
+        Self {
+            origin,
+            radius,
+            proxy: None,
+            chunks: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push_chunk(&mut self, chunk: GpuChunk) {
+        self.chunks.push(chunk);
     }
 
     fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
@@ -84,9 +103,51 @@ impl SceneGpu {
     }
 }
 
-fn upload_chunk(device: &wgpu::Device, positions: &[[f32; 3]], origin: Vec3) -> GpuChunk {
+const VERTEX_BYTES: u64 = 12;
+/// 1 フレームで載せる頂点の目安。これ以上だと UI が止まる。
+const UPLOAD_FRAME_BYTES: u64 = 8 * 1024 * 1024;
+
+/// `max_buffer_size` に収まる頂点数。三角形境界に揃える。
+fn verts_per_chunk(max_buffer_size: u64) -> usize {
+    let verts = (max_buffer_size / VERTEX_BYTES) as usize;
+    (verts / 3 * 3).max(3)
+}
+
+/// UI を止めない大きさの、1 フレーム分の頂点数。
+pub(crate) fn verts_per_frame(max_buffer_size: u64) -> usize {
+    verts_per_chunk(UPLOAD_FRAME_BYTES.min(max_buffer_size))
+}
+
+/// `[start, total)` から次に載せる三角形境界の範囲。
+pub(crate) fn next_upload_range(
+    start: usize,
+    total: usize,
+    cap: usize,
+) -> Option<std::ops::Range<usize>> {
+    if start >= total || cap < 3 {
+        return None;
+    }
+    let mut end = (start + cap).min(total);
+    end -= end % 3;
+    if end <= start {
+        end = (start + 3).min(total);
+        end -= end % 3;
+    }
+    if end <= start {
+        None
+    } else {
+        Some(start..end)
+    }
+}
+
+pub(crate) fn upload_positions(device: &wgpu::Device, positions: &[[f32; 3]]) -> GpuChunk {
+    upload_chunk(device, positions)
+}
+
+fn upload_chunk(device: &wgpu::Device, positions: &[[f32; 3]]) -> GpuChunk {
     let n = positions.len();
-    let size = (n.max(1) * std::mem::size_of::<[f32; 3]>()) as u64;
+    debug_assert!(n == 0 || n <= verts_per_chunk(device.limits().max_buffer_size));
+    let size = (n.max(1) as u64) * VERTEX_BYTES;
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("meshpad.vertices"),
         size,
@@ -98,28 +159,13 @@ fn upload_chunk(device: &wgpu::Device, positions: &[[f32; 3]], origin: Vec3) -> 
             let mut mapped = vertex_buffer.slice(..).get_mapped_range_mut();
             let dst: &mut [[f32; 3]] = bytemuck::cast_slice_mut(&mut mapped);
             debug_assert_eq!(dst.len(), n);
-            write_shifted(dst, positions, origin);
+            dst.copy_from_slice(positions);
         }
         vertex_buffer.unmap();
     }
     GpuChunk {
         vertex_buffer,
         vertex_count: n as u32,
-    }
-}
-
-fn write_shifted(dst: &mut [[f32; 3]], src: &[[f32; 3]], origin: Vec3) {
-    let ox = origin.x;
-    let oy = origin.y;
-    let oz = origin.z;
-    if src.len() >= PAR_VERTS {
-        dst.par_iter_mut()
-            .zip(src.par_iter())
-            .for_each(|(d, p)| *d = [p[0] - ox, p[1] - oy, p[2] - oz]);
-    } else {
-        for (d, p) in dst.iter_mut().zip(src) {
-            *d = [p[0] - ox, p[1] - oy, p[2] - oz];
-        }
     }
 }
 
@@ -292,11 +338,14 @@ impl Renderer {
     ) {
         let (view, proj, _) = camera.view_proj(aspect);
         let vp = proj * view;
+        let origin = scene.map(|s| s.origin.to_array()).unwrap_or([0.0; 3]);
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
             light_dir: camera.light_dir().to_array(),
             _pad0: 0.0,
             color: [0.74, 0.74, 0.76, 1.0],
+            origin,
+            _pad1: 0.0,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -384,4 +433,36 @@ fn make_targets(
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
     (color, color_view, depth, depth_view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_wgpu_buffer_fits_triangle_aligned_chunk() {
+        let cap = verts_per_chunk(256 * 1024 * 1024);
+        assert_eq!(cap % 3, 0);
+        assert!(cap as u64 * VERTEX_BYTES <= 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn lucy_scale_mesh_splits_under_256mb() {
+        // Device::create_buffer が拒否した 1010006712 バイト（lucy 級）。
+        let verts = 1_010_006_712u64 / VERTEX_BYTES;
+        let cap = verts_per_chunk(256 * 1024 * 1024);
+        assert!(verts as usize > cap);
+        let n_chunks = (verts as usize).div_ceil(cap);
+        assert_eq!(n_chunks, 4);
+    }
+
+    #[test]
+    fn upload_range_stays_triangle_aligned() {
+        let cap = verts_per_frame(256 * 1024 * 1024);
+        assert_eq!(cap % 3, 0);
+        let r = next_upload_range(0, 10_000, cap).unwrap();
+        assert_eq!(r.start, 0);
+        assert_eq!(r.end % 3, 0);
+        assert!(r.end <= cap || r.end == 10_000 / 3 * 3);
+    }
 }

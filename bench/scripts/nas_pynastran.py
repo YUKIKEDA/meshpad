@@ -20,6 +20,17 @@ def _bdf():
     return model
 
 
+def _print_card_8():
+    try:
+        from pyNastran.bdf.field_writer_8 import print_card_8
+    except ImportError as e:
+        raise SystemExit(
+            "pyNastran is required. Use bench/.venv:\n"
+            r"  bench\.venv\Scripts\python -m pip install -r bench/requirements.txt"
+        ) from e
+    return print_card_8
+
+
 def write_bdf(model, path: Path, *, size: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     kwargs: dict = {
@@ -36,6 +47,10 @@ def write_bdf(model, path: Path, *, size: int) -> None:
 
 
 def write_shell(mesh: Mesh, path: Path, *, size: int) -> None:
+    # lucy 級を BDF オブジェクトに積むとメモリが足りない。書式は print_card_8 のままストリームする。
+    if size == 8 and mesh.nfaces >= 2_000_000:
+        write_shell_stream8(mesh, path)
+        return
     model = _bdf()
     model.add_pshell(1, 1, 0.001)
     xs, ys, zs = mesh.xs, mesh.ys, mesh.zs
@@ -49,6 +64,66 @@ def write_shell(mesh: Mesh, path: Path, *, size: int) -> None:
         )
         eid += 1
     write_bdf(model, path, size=size)
+
+
+def write_shell_stream8(mesh: Mesh, path: Path) -> None:
+    print_card_8 = _print_card_8()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nnode = mesh.nverts
+    nelem = mesh.nfaces
+    xs, ys, zs = mesh.xs, mesh.ys, mesh.zs
+    it = mesh.indices
+    buf: list[str] = []
+    with path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("$pyNastran: version=msc\n")
+        f.write("$pyNastran: punch=True\n")
+        f.write("$pyNastran: encoding=utf-8\n")
+        f.write(f"$pyNastran: nnodes={nnode}\n")
+        f.write(f"$pyNastran: nelements={nelem}\n")
+        f.write("$NODES\n")
+
+        def flush() -> None:
+            if buf:
+                f.writelines(buf)
+                buf.clear()
+
+        for i in range(nnode):
+            buf.append(
+                print_card_8(
+                    ["GRID", i + 1, None, float(xs[i]), float(ys[i]), float(zs[i])]
+                )
+            )
+            if len(buf) >= 4096:
+                flush()
+            if i > 0 and i % 2_000_000 == 0:
+                print(f"    GRID {i}/{nnode}", flush=True)
+        flush()
+        f.write("$ELEMENTS\n")
+        eid = 1
+        for i in range(0, len(it), 3):
+            buf.append(
+                print_card_8(
+                    [
+                        "CTRIA3",
+                        eid,
+                        1,
+                        int(it[i]) + 1,
+                        int(it[i + 1]) + 1,
+                        int(it[i + 2]) + 1,
+                    ]
+                )
+            )
+            eid += 1
+            if len(buf) >= 4096:
+                flush()
+            if eid > 1 and eid % 2_000_000 == 1:
+                print(f"    CTRIA3 {eid - 1}/{nelem}", flush=True)
+        flush()
+        f.write("$PROPERTIES\n")
+        f.write(print_card_8(["PSHELL", 1, 1, 0.001]))
+        f.write("$MATERIALS\n")
+        f.write(print_card_8(["MAT1", 1, 2.1e11, None, 0.3]))
+        f.write("ENDDATA\n")
 
 
 def _hex_nodes(cells: int):

@@ -11,13 +11,14 @@ use glam::Vec3;
 use memmap2::Mmap;
 use rayon::prelude::*;
 
-use crate::mesh::{bounds_to_soup, ParsedMesh};
+use crate::mesh::{bounds_to_soup, LoadProbe, ParsedMesh};
 
 const HEADER: usize = 80;
 const RECORD: usize = 50;
 /// これ以上の三角形は展開と AABB を Rayon で分割する。
 const PAR_TRIANGLES: usize = 250_000;
-const PAR_TRI_CHUNK: usize = 16_384;
+pub(crate) const PAR_TRI_CHUNK: usize = 16_384;
+const PROG_STEP: usize = 1 << 20;
 
 pub use crate::mesh::TriangleSoup;
 
@@ -82,9 +83,17 @@ pub fn load_stl(path: &Path) -> Result<Vec<[f32; 3]>> {
 }
 
 pub(crate) fn load_parsed(path: &Path) -> Result<ParsedMesh> {
+    load_parsed_at(path, None, 0)
+}
+
+pub(crate) fn load_parsed_at(
+    path: &Path,
+    probe: Option<&LoadProbe>,
+    base: u64,
+) -> Result<ParsedMesh> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }.with_context(|| format!("mmap {}", path.display()))?;
-    parse_parsed(&mmap)
+    parse_parsed(&mmap, probe, base)
 }
 
 /// バイト列を STL として解釈する。
@@ -103,14 +112,17 @@ pub(crate) fn load_parsed(path: &Path) -> Result<ParsedMesh> {
 /// assert_eq!(positions.len() % 3, 0);
 /// ```
 pub fn parse_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
-    Ok(parse_parsed(bytes)?.positions)
+    Ok(parse_parsed(bytes, None, 0)?.positions)
 }
 
-fn parse_parsed(bytes: &[u8]) -> Result<ParsedMesh> {
+fn parse_parsed(bytes: &[u8], probe: Option<&LoadProbe>, base: u64) -> Result<ParsedMesh> {
+    if cancelled(probe) {
+        bail!("cancelled");
+    }
     if looks_like_ascii(bytes) && !binary_size_matches(bytes) {
-        parse_ascii_mesh(bytes)
+        parse_ascii_mesh(bytes, probe, base)
     } else {
-        parse_binary_mesh(bytes)
+        parse_binary_mesh(bytes, probe, base)
     }
 }
 
@@ -129,10 +141,13 @@ fn parse_parsed(bytes: &[u8]) -> Result<ParsedMesh> {
 /// assert_eq!(positions.len() % 3, 0);
 /// ```
 pub fn parse_binary_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
-    Ok(parse_binary_mesh(bytes)?.positions)
+    Ok(parse_binary_mesh(bytes, None, 0)?.positions)
 }
 
-fn parse_binary_mesh(bytes: &[u8]) -> Result<ParsedMesh> {
+fn parse_binary_mesh(bytes: &[u8], probe: Option<&LoadProbe>, base: u64) -> Result<ParsedMesh> {
+    if cancelled(probe) {
+        bail!("cancelled");
+    }
     if bytes.len() < HEADER + 4 {
         bail!("STL too small");
     }
@@ -152,10 +167,14 @@ fn parse_binary_mesh(bytes: &[u8]) -> Result<ParsedMesh> {
         positions.set_len(nvert);
     }
     let (min, max) = if count >= PAR_TRIANGLES {
-        unpack_tris_par(recs, &mut positions)
+        unpack_tris_par(recs, &mut positions, probe, base)?
     } else {
-        unpack_tris(recs, &mut positions)
+        unpack_tris(recs, &mut positions, probe, Some(base))?
     };
+    if cancelled(probe) {
+        bail!("cancelled");
+    }
+    report(probe, base.saturating_add(bytes.len() as u64));
     Ok(ParsedMesh {
         positions,
         min,
@@ -163,11 +182,24 @@ fn parse_binary_mesh(bytes: &[u8]) -> Result<ParsedMesh> {
     })
 }
 
-fn unpack_tris(recs: &[u8], out: &mut [[f32; 3]]) -> (Vec3, Vec3) {
+fn unpack_tris(
+    recs: &[u8],
+    out: &mut [[f32; 3]],
+    probe: Option<&LoadProbe>,
+    progress_base: Option<u64>,
+) -> Result<(Vec3, Vec3)> {
     debug_assert_eq!(recs.len() / RECORD, out.len() / 3);
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     for (i, rec) in recs.chunks_exact(RECORD).enumerate() {
+        if i % PAR_TRI_CHUNK == 0 {
+            if cancelled(probe) {
+                bail!("cancelled");
+            }
+            if let Some(base) = progress_base {
+                report(probe, base.saturating_add((i * RECORD) as u64));
+            }
+        }
         for v in 0..3 {
             let o = 12 + v * 12;
             let x = f32::from_le_bytes(rec[o..o + 4].try_into().unwrap());
@@ -179,24 +211,40 @@ fn unpack_tris(recs: &[u8], out: &mut [[f32; 3]]) -> (Vec3, Vec3) {
             out[i * 3 + v] = [x, y, z];
         }
     }
-    (min, max)
+    Ok((min, max))
 }
 
-fn unpack_tris_par(recs: &[u8], out: &mut [[f32; 3]]) -> (Vec3, Vec3) {
+fn unpack_tris_par(
+    recs: &[u8],
+    out: &mut [[f32; 3]],
+    probe: Option<&LoadProbe>,
+    base: u64,
+) -> Result<(Vec3, Vec3)> {
+    if cancelled(probe) {
+        bail!("cancelled");
+    }
     let rec_stride = RECORD * PAR_TRI_CHUNK;
     let vert_stride = 3 * PAR_TRI_CHUNK;
-    let bounds: Vec<(Vec3, Vec3)> = recs
+    report(probe, base);
+    let bounds: Result<Vec<(Vec3, Vec3)>, anyhow::Error> = recs
         .par_chunks(rec_stride)
         .zip(out.par_chunks_mut(vert_stride))
-        .map(|(rec_chunk, vert_chunk)| unpack_tris(rec_chunk, vert_chunk))
+        .map(|(rec_chunk, vert_chunk)| {
+            let b = unpack_tris(rec_chunk, vert_chunk, probe, None)?;
+            if let Some(p) = probe {
+                p.done
+                    .fetch_add(rec_chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok::<_, anyhow::Error>(b)
+        })
         .collect();
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
-    for (a, b) in bounds {
+    for (a, b) in bounds? {
         min = min.min(a);
         max = max.max(b);
     }
-    (min, max)
+    Ok((min, max))
 }
 
 /// バイト列を ASCII STL として解釈する。
@@ -217,32 +265,59 @@ fn unpack_tris_par(recs: &[u8], out: &mut [[f32; 3]]) -> (Vec3, Vec3) {
 /// assert_eq!(positions.len(), 3);
 /// ```
 pub fn parse_ascii_stl(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
-    Ok(parse_ascii_mesh(bytes)?.positions)
+    Ok(parse_ascii_mesh(bytes, None, 0)?.positions)
 }
 
-fn parse_ascii_mesh(bytes: &[u8]) -> Result<ParsedMesh> {
+fn parse_ascii_mesh(bytes: &[u8], probe: Option<&LoadProbe>, base: u64) -> Result<ParsedMesh> {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
-        Ok(text) => parse_ascii_text(text, bytes.len()),
-        Err(_) => parse_ascii_bytes(bytes),
+        Ok(text) => parse_ascii_text(text, bytes.len(), probe, base),
+        Err(_) => parse_ascii_bytes(bytes, probe, base),
     }
 }
 
-fn parse_ascii_text(text: &str, nbytes: usize) -> Result<ParsedMesh> {
+fn parse_ascii_text(
+    text: &str,
+    nbytes: usize,
+    probe: Option<&LoadProbe>,
+    base: u64,
+) -> Result<ParsedMesh> {
     let mut acc = AsciiAcc::new(nbytes);
+    let mut seen = 0usize;
+    let mut last = 0usize;
     for raw in text.lines() {
+        seen += raw.len() + 1;
+        if seen.saturating_sub(last) >= PROG_STEP {
+            if cancelled(probe) {
+                bail!("cancelled");
+            }
+            report(probe, base.saturating_add(seen as u64));
+            last = seen;
+        }
         let line = trim_ascii(raw.as_bytes());
         if !line.is_empty() {
             acc.ingest(line);
         }
     }
+    if cancelled(probe) {
+        bail!("cancelled");
+    }
+    report(probe, base.saturating_add(nbytes as u64));
     acc.finish()
 }
 
-fn parse_ascii_bytes(bytes: &[u8]) -> Result<ParsedMesh> {
+fn parse_ascii_bytes(bytes: &[u8], probe: Option<&LoadProbe>, base: u64) -> Result<ParsedMesh> {
     let mut acc = AsciiAcc::new(bytes.len());
     let mut i = 0;
+    let mut last = 0usize;
     while i < bytes.len() {
+        if i.saturating_sub(last) >= PROG_STEP {
+            if cancelled(probe) {
+                bail!("cancelled");
+            }
+            report(probe, base.saturating_add(i as u64));
+            last = i;
+        }
         let start = i;
         while i < bytes.len() && bytes[i] != b'\n' {
             i += 1;
@@ -259,6 +334,10 @@ fn parse_ascii_bytes(bytes: &[u8]) -> Result<ParsedMesh> {
             acc.ingest(line);
         }
     }
+    if cancelled(probe) {
+        bail!("cancelled");
+    }
+    report(probe, base.saturating_add(bytes.len() as u64));
     acc.finish()
 }
 
@@ -385,6 +464,16 @@ fn looks_like_ascii(bytes: &[u8]) -> bool {
             .any(|&b| b == 0)
 }
 
+fn report(probe: Option<&LoadProbe>, done: u64) {
+    if let Some(p) = probe {
+        p.report(done);
+    }
+}
+
+fn cancelled(probe: Option<&LoadProbe>) -> bool {
+    probe.is_some_and(LoadProbe::is_cancelled)
+}
+
 #[cfg(test)]
 fn recenter(positions: Vec<[f32; 3]>) -> TriangleSoup {
     let mut min = Vec3::splat(f32::MAX);
@@ -454,6 +543,26 @@ mod tests {
     #[test]
     fn reject_truncated() {
         assert!(parse_binary_stl(&[0u8; 10]).is_err());
+    }
+
+    #[test]
+    fn unpack_tris_stops_when_cancelled() {
+        let recs = vec![0u8; RECORD];
+        let mut out = vec![[0.0f32; 3]; 3];
+        let probe = LoadProbe::new(1);
+        probe.cancel();
+        let err = unpack_tris(&recs, &mut out, Some(&probe), Some(0)).unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn unpack_tris_par_stops_when_cancelled() {
+        let recs = vec![0u8; RECORD * PAR_TRI_CHUNK];
+        let mut out = vec![[0.0f32; 3]; 3 * PAR_TRI_CHUNK];
+        let probe = LoadProbe::new(1);
+        probe.cancel();
+        let err = unpack_tris_par(&recs, &mut out, Some(&probe), 0).unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
     }
 
     #[test]

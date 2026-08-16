@@ -7,7 +7,6 @@
 //! 表は Fx ハッシュ。体積面の巻きは置換番号、初回挿入で容量を予約する。
 //!
 //! 小さいファイルはこのマイルストーンでは点群を出さず、外皮まで同期で載せる。
-//! 点群先行は走査を裏に回す C-lite 側。
 
 use std::path::Path;
 
@@ -16,9 +15,10 @@ use glam::Vec3;
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 
-use crate::mesh::{bounds_to_soup, ParsedMesh, TriangleSoup};
+use crate::mesh::{bounds_to_soup, LoadProbe, ParsedMesh, TriangleSoup};
 
 const MAX_FIELDS: usize = 16;
+const PROG_STEP: usize = 1 << 20;
 
 type Map<K, V> = FxHashMap<K, V>;
 
@@ -33,10 +33,14 @@ fn map_with_cap<K, V>(cap: usize) -> Map<K, V> {
 /// # Errors
 ///
 /// 開けない、マップできない、または外皮三角形が 1 枚も無いとき。
-pub(crate) fn load_nas(path: &Path) -> Result<(ParsedMesh, Vec<String>)> {
+pub(crate) fn load_nas_at(
+    path: &Path,
+    probe: Option<&LoadProbe>,
+    base: u64,
+) -> Result<(ParsedMesh, Vec<String>)> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }.with_context(|| format!("mmap {}", path.display()))?;
-    parse_nas_mesh(&mmap)
+    parse_nas_mesh(&mmap, probe, base)
 }
 
 /// バイト列を bulk として解釈し、外皮の三角形スープを返す。
@@ -55,12 +59,16 @@ pub(crate) fn load_nas(path: &Path) -> Result<(ParsedMesh, Vec<String>)> {
 /// let _ = (soup.triangle_count(), warnings.len());
 /// ```
 pub fn parse_nas(bytes: &[u8]) -> Result<(TriangleSoup, Vec<String>)> {
-    let (mesh, warnings) = parse_nas_mesh(bytes)?;
+    let (mesh, warnings) = parse_nas_mesh(bytes, None, 0)?;
     Ok((bounds_to_soup(mesh.positions, mesh.min, mesh.max), warnings))
 }
 
-fn parse_nas_mesh(bytes: &[u8]) -> Result<(ParsedMesh, Vec<String>)> {
-    finish(scan(bytes))
+fn parse_nas_mesh(
+    bytes: &[u8],
+    probe: Option<&LoadProbe>,
+    base: u64,
+) -> Result<(ParsedMesh, Vec<String>)> {
+    finish(scan(bytes, probe, base), probe)
 }
 
 struct Card<'a> {
@@ -112,7 +120,7 @@ struct Acc {
     unknown: Map<String, u32>,
 }
 
-fn scan(bytes: &[u8]) -> Acc {
+fn scan(bytes: &[u8], probe: Option<&LoadProbe>, base: u64) -> Acc {
     let est = bytes.len() / 48 + 8;
     let mut acc = Acc {
         est_faces: bytes.len() / 50 + 8,
@@ -127,7 +135,17 @@ fn scan(bytes: &[u8]) -> Acc {
     };
     let mut cur = Card::new();
     let mut i = 0;
+    let mut last = 0usize;
     while i < bytes.len() {
+        if i.saturating_sub(last) >= PROG_STEP {
+            if probe.is_some_and(LoadProbe::is_cancelled) {
+                break;
+            }
+            if let Some(p) = probe {
+                p.report(base.saturating_add(i as u64));
+            }
+            last = i;
+        }
         let start = i;
         while i < bytes.len() && bytes[i] != b'\n' {
             i += 1;
@@ -168,6 +186,9 @@ fn scan(bytes: &[u8]) -> Acc {
         append_fields(&mut cur, line, csv, wide);
     }
     flush_card(&mut cur, &mut acc);
+    if let Some(p) = probe {
+        p.report(base.saturating_add(bytes.len() as u64));
+    }
     acc
 }
 
@@ -377,7 +398,10 @@ fn parse_nas_f32(s: &[u8]) -> Option<f32> {
     fast_float2::parse::<f32, _>(s).ok()
 }
 
-fn finish(acc: Acc) -> Result<(ParsedMesh, Vec<String>)> {
+fn finish(acc: Acc, probe: Option<&LoadProbe>) -> Result<(ParsedMesh, Vec<String>)> {
+    if probe.is_some_and(LoadProbe::is_cancelled) {
+        bail!("cancelled");
+    }
     let Acc {
         grids,
         shells,

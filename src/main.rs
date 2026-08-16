@@ -14,9 +14,12 @@
 #![warn(missing_docs)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use eframe::egui;
-use eframe::egui_wgpu::wgpu::{Backends, InstanceDescriptor};
+use eframe::egui_wgpu::wgpu::{
+    Backends, DeviceDescriptor, Features, InstanceDescriptor, MemoryHints, Trace,
+};
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
 use meshpad::app::MeshpadApp;
 use meshpad::icon;
@@ -30,6 +33,18 @@ fn main() -> eframe::Result<()> {
                 backends: Backends::DX12,
                 ..Default::default()
             },
+            // eframe 既定の max_buffer_size は 256MB。lucy 級の全載せはアダプタ上限が要る。
+            device_descriptor: Arc::new(|adapter| {
+                let mut limits = adapter.limits();
+                limits.max_texture_dimension_2d = limits.max_texture_dimension_2d.max(8192);
+                DeviceDescriptor {
+                    label: Some("meshpad"),
+                    required_features: Features::default(),
+                    required_limits: limits,
+                    memory_hints: MemoryHints::Performance,
+                    trace: Trace::Off,
+                }
+            }),
             ..Default::default()
         }),
         ..Default::default()

@@ -3,6 +3,8 @@ struct Uniforms {
     light_dir: vec3<f32>,
     _pad0: f32,
     color: vec4<f32>,
+    origin: vec3<f32>,
+    _pad1: f32,
 };
 
 @group(0) @binding(0)
@@ -16,8 +18,9 @@ struct VsOut {
 @vertex
 fn vs_main(@location(0) pos: vec3<f32>) -> VsOut {
     var o: VsOut;
-    o.world = pos;
-    o.clip = u.view_proj * vec4<f32>(pos, 1.0);
+    let p = pos - u.origin;
+    o.world = p;
+    o.clip = u.view_proj * vec4<f32>(p, 1.0);
     return o;
 }
 
