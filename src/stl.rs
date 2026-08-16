@@ -163,6 +163,7 @@ fn parse_binary_mesh(bytes: &[u8], probe: Option<&LoadProbe>, base: u64) -> Resu
     let nvert = count * 3;
     let mut positions = Vec::with_capacity(nvert);
     // SAFETY: `unpack_tris` が全要素を書く。`[f32; 3]` は drop しない。
+    #[allow(clippy::uninit_vec)]
     unsafe {
         positions.set_len(nvert);
     }

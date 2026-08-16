@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check Cargo.toml version matches tag
+        shell: pwsh
+        run: |
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          if ($cargo -ne $tag) {
+            throw "Cargo.toml version '$cargo' does not match tag '$tag'"
+          }
+
+      - name: Build release
+        run: cargo build --locked --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\meshpad.exe dist\meshpad.exe
+          $hash = (Get-FileHash dist\meshpad.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path dist\SHA256SUMS.txt -Value "$hash  meshpad.exe" -Encoding ascii
+          Get-Content dist\SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/meshpad.exe
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            Windows x64 の単一 exe です。Visual C++ 再頒布パッケージは不要です（CRT 静的リンク）。
+            要件: Windows 10/11、Direct3D 12 が使える GPU。
