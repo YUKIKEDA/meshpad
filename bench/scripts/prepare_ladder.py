@@ -121,9 +121,14 @@ def main() -> int:
                 mesh = read_ply(src)
                 meshes[tag] = mesh
 
-    if do_stl and args.tier == "all":
+    lucy_mesh = None
+    if args.tier == "all" and (do_stl or do_ascii or do_nas):
         lucy = _need(DATA / "lucy" / "lucy.ply")
-        emit_stl("lucy", lucy)
+        if do_stl or do_ascii:
+            lucy_mesh = emit_stl("lucy", lucy, binary=do_stl, ascii=do_ascii)
+        elif do_nas:
+            print(f"read {lucy} for NAS ...")
+            lucy_mesh = read_ply(lucy)
 
     if do_nas:
         _wipe_nas()
@@ -136,6 +141,7 @@ def main() -> int:
         emit_volume("hex", 40, (8,))
         if args.tier == "all":
             emit_volume("tet", 50, (8,))
+            emit_shell("lucy", lucy_mesh, (8,))
 
     print("done")
     return 0

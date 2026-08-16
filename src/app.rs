@@ -2,17 +2,21 @@
 //!
 //! 起動引数・ドロップ・「ファイル → 開く」のファイル列は、いずれも新しいシーンになる。
 //! `F` で全体フィット。左下のビューキューブで向き＋ズームを揃える。
+//! 操作一覧はタイトルの Help、または `F1`。
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::time::Instant;
 
 use eframe::egui::{self, Color32, PointerButton, RichText, Sense, Stroke, ViewportCommand};
 use glam::Vec2;
 
 use crate::camera::{Camera, CameraTween};
-use crate::gpu::{Renderer, SceneGpu};
+use crate::gpu::{self, Renderer, SceneGpu};
 use crate::icon;
 use crate::load;
+use crate::mesh::{LoadProbe, TriangleSoup};
 use crate::open;
 use crate::view_cube;
 
@@ -30,6 +34,8 @@ pub struct MeshpadApp {
     warnings: Vec<String>,
     title_file: Option<String>,
     title_icon: egui::TextureHandle,
+    opening: Option<Opening>,
+    help_open: bool,
 }
 
 impl MeshpadApp {
@@ -65,19 +71,21 @@ impl MeshpadApp {
                 icon::title_color_image(),
                 egui::TextureOptions::NEAREST,
             ),
+            opening: None,
+            help_open: false,
         };
         if !initial_paths.is_empty() {
-            app.open_paths(&rs.device, &initial_paths);
+            app.start_open(&initial_paths);
         }
         app
     }
 
-    fn open_paths(&mut self, device: &eframe::egui_wgpu::wgpu::Device, paths: &[PathBuf]) {
-        let (files, mut warnings) = open::expand_open_inputs(paths);
+    fn start_open(&mut self, paths: &[PathBuf]) {
+        self.opening = None;
         self.tween = None;
-
+        self.pending_fit = None;
+        let (files, warnings) = open::expand_open_inputs(paths);
         if files.is_empty() {
-            self.scene = None;
             self.pending_fit = None;
             self.title_file = None;
             self.warnings = warnings;
@@ -85,28 +93,129 @@ impl MeshpadApp {
             return;
         }
 
-        let started = Instant::now();
-        match load::load_paths(&files) {
-            Ok((soup, load_warnings)) => {
-                let load_ms = started.elapsed().as_secs_f64() * 1000.0;
-                warnings.extend(load_warnings);
-                self.warnings = warnings;
-                self.scene = Some(SceneGpu::from_soup(device, &soup));
-                self.pending_fit = Some(soup.radius);
-                self.title_file = files.first().map(|p| file_label(p, files.len()));
-                self.status = format_load_status(soup.triangle_count(), load_ms);
+        let label = files
+            .first()
+            .map(|p| file_label(p, files.len()))
+            .unwrap_or_else(|| "mesh".into());
+        let total: u64 = files
+            .iter()
+            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        let probe = Arc::new(LoadProbe::new(total));
+        let (tx, rx) = mpsc::channel();
+        let files_thread = files;
+        let probe_thread = probe.clone();
+        let spawned = std::thread::Builder::new()
+            .name("meshpad-load".into())
+            .spawn(move || {
+                if probe_thread.is_cancelled() {
+                    let _ = tx.send(ParseOut::Cancelled);
+                    return;
+                }
+                match load::load_paths_at(&files_thread, Some(probe_thread.as_ref())) {
+                    Ok((soup, load_warnings)) => {
+                        if probe_thread.is_cancelled() {
+                            let _ = tx.send(ParseOut::Cancelled);
+                        } else {
+                            let _ = tx.send(ParseOut::Ok {
+                                soup,
+                                warnings: load_warnings,
+                            });
+                        }
+                    }
+                    Err(_) if probe_thread.is_cancelled() => {
+                        let _ = tx.send(ParseOut::Cancelled);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ParseOut::Err(e.to_string()));
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.warnings = warnings;
+            self.title_file = None;
+            self.status = "could not start load thread".into();
+            return;
+        }
+
+        self.title_file = Some(label);
+        self.warnings = warnings;
+        self.status = "reading".into();
+        self.opening = Some(Opening::Parse(ParseJob {
+            rx,
+            probe,
+            started: Instant::now(),
+        }));
+    }
+
+    fn poll_open(&mut self, frame: &eframe::Frame, ctx: &egui::Context) {
+        if self.opening.is_some() {
+            ctx.request_repaint();
+        }
+        let taken = self.opening.take();
+        match taken {
+            Some(Opening::Parse(job)) => match job.rx.try_recv() {
+                Ok(ParseOut::Ok { soup, warnings }) => {
+                    self.warnings.extend(warnings);
+                    let scene = SceneGpu::from_bounds(soup.origin, soup.radius);
+                    self.status = "uploading".into();
+                    self.opening = Some(Opening::Gpu(GpuUpload {
+                        soup,
+                        scene,
+                        next: 0,
+                        started: job.started,
+                    }));
+                }
+                Ok(ParseOut::Err(msg)) => {
+                    self.status = msg;
+                    self.opening = None;
+                }
+                Ok(ParseOut::Cancelled) => {
+                    self.opening = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    let pct = (job.probe.fraction() * 100.0).round() as u32;
+                    self.status = format!("reading  {pct}%");
+                    self.opening = Some(Opening::Parse(job));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.status = "load thread ended".into();
+                    self.opening = None;
+                }
+            },
+            Some(Opening::Gpu(mut up)) => {
+                let Some(rs) = frame.wgpu_render_state() else {
+                    self.opening = Some(Opening::Gpu(up));
+                    return;
+                };
+                let cap = gpu::verts_per_frame(rs.device.limits().max_buffer_size);
+                match gpu::next_upload_range(up.next, up.soup.positions.len(), cap) {
+                    Some(range) => {
+                        let chunk = gpu::upload_positions(&rs.device, &up.soup.positions[range.clone()]);
+                        up.scene.push_chunk(chunk);
+                        up.next = range.end;
+                        let frac = if up.soup.positions.is_empty() {
+                            1.0
+                        } else {
+                            up.next as f32 / up.soup.positions.len() as f32
+                        };
+                        self.status = format!("uploading  {}%", (frac * 100.0).round() as u32);
+                        self.opening = Some(Opening::Gpu(up));
+                    }
+                    None => {
+                        let load_ms = up.started.elapsed().as_secs_f64() * 1000.0;
+                        self.pending_fit = Some(up.scene.radius);
+                        self.status = format_load_status(up.soup.triangle_count(), load_ms);
+                        self.scene = Some(up.scene);
+                        self.opening = None;
+                    }
+                }
             }
-            Err(e) => {
-                self.scene = None;
-                self.pending_fit = None;
-                self.title_file = None;
-                self.warnings = warnings;
-                self.status = e.to_string();
-            }
+            None => {}
         }
     }
 
-    fn try_open_dialog(&mut self, frame: &eframe::Frame) {
+    fn try_open_dialog(&mut self, _frame: &eframe::Frame) {
         let picked = rfd::FileDialog::new()
             .set_title("Open")
             .add_filter("Mesh", &["stl", "nas", "nastran"])
@@ -114,21 +223,51 @@ impl MeshpadApp {
             .add_filter("NAS", &["nas", "nastran"])
             .pick_files();
         if let Some(files) = picked {
-            self.open_if_device(frame, &files);
+            self.start_open(&files);
         }
     }
 
-    fn open_if_device(&mut self, frame: &eframe::Frame, paths: &[PathBuf]) {
+    fn open_if_device(&mut self, _frame: &eframe::Frame, paths: &[PathBuf]) {
         if paths.is_empty() {
             return;
         }
-        if let Some(rs) = frame.wgpu_render_state() {
-            self.open_paths(&rs.device, paths);
-        }
+        self.start_open(paths);
     }
 }
 
-// mmap・パース・AABB までの時間。GPU アップロードは含めない。
+enum Opening {
+    Parse(ParseJob),
+    Gpu(GpuUpload),
+}
+
+struct ParseJob {
+    rx: Receiver<ParseOut>,
+    probe: Arc<LoadProbe>,
+    started: Instant,
+}
+
+impl Drop for ParseJob {
+    fn drop(&mut self) {
+        self.probe.cancel();
+    }
+}
+
+enum ParseOut {
+    Ok {
+        soup: TriangleSoup,
+        warnings: Vec<String>,
+    },
+    Err(String),
+    Cancelled,
+}
+
+struct GpuUpload {
+    soup: TriangleSoup,
+    scene: SceneGpu,
+    next: usize,
+    started: Instant,
+}
+
 fn format_load_status(triangles: usize, load_ms: f64) -> String {
     if load_ms < 10.0 {
         format!("{triangles} triangles  {load_ms:.1}ms")
@@ -164,11 +303,118 @@ fn hover_dropping(ctx: &egui::Context) -> bool {
     ctx.input(|i| !i.raw.hovered_files.is_empty())
 }
 
+fn show_controls_help(ctx: &egui::Context, open: &mut bool) {
+    let screen = ctx.screen_rect();
+    let below_title = egui::Rect::from_min_max(
+        egui::pos2(screen.left(), screen.top() + TITLE_H),
+        screen.max,
+    );
+    egui::Window::new("Controls")
+        .open(open)
+        .resizable(false)
+        .collapsible(false)
+        .constrain_to(below_title)
+        .anchor(egui::Align2::RIGHT_TOP, [-12.0, 8.0])
+        .frame(
+            egui::Frame::popup(ctx.style().as_ref())
+                .fill(Color32::from_rgb(24, 24, 26))
+                .stroke(Stroke::new(1.0_f32, Color32::from_gray(48)))
+                .inner_margin(egui::Margin::symmetric(14, 12)),
+        )
+        .show(ctx, |ui| {
+            egui::Grid::new("meshpad.help")
+                .num_columns(2)
+                .spacing([20.0, 6.0])
+                .show(ui, |ui| {
+                    help_row(ui, "Left drag", "Orbit");
+                    help_row(ui, "Right drag", "Pan");
+                    help_row(ui, "Middle drag", "Pan");
+                    help_row(ui, "Scroll", "Zoom to cursor");
+                    help_row(ui, "F", "Fit view");
+                    help_row(ui, "Ctrl+O", "Open (replaces scene)");
+                    help_row(ui, "Drop files", "Replace scene");
+                    help_row(ui, "View cube", "Snap orientation and fit");
+                });
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Esc or F1 to close")
+                    .color(Color32::from_gray(120))
+                    .size(12.0),
+            );
+        });
+}
+
+fn help_row(ui: &mut egui::Ui, keys: &str, action: &str) {
+    ui.label(
+        RichText::new(keys)
+            .color(Color32::from_gray(230))
+            .size(13.0),
+    );
+    ui.label(
+        RichText::new(action)
+            .color(Color32::from_gray(160))
+            .size(13.0),
+    );
+    ui.end_row();
+}
+
+fn paint_opening_overlay(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    frac: f32,
+    stage: &str,
+    name: &str,
+) {
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(12, 12, 14, 210),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+        |ui| {
+            ui.add_space((rect.height() * 0.42).max(24.0));
+            ui.add(egui::Spinner::new().size(22.0));
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(name)
+                    .color(Color32::from_gray(230))
+                    .size(16.0),
+            );
+            ui.add_space(4.0);
+            let pct = (frac * 100.0).clamp(0.0, 100.0).round() as u32;
+            ui.label(
+                RichText::new(format!("{stage}  {pct}%"))
+                    .color(Color32::from_gray(170))
+                    .size(14.0),
+            );
+            ui.add_space(12.0);
+            let bar_w = (rect.width() * 0.36).clamp(180.0, 320.0);
+            let (bar, _) = ui.allocate_exact_size(egui::vec2(bar_w, 4.0), Sense::hover());
+            ui.painter()
+                .rect_filled(bar, 2.0, Color32::from_gray(42));
+            let fill_w = bar.width() * frac.clamp(0.0, 1.0);
+            if fill_w > 0.0 {
+                let fill = egui::Rect::from_min_size(bar.min, egui::vec2(fill_w, bar.height()));
+                ui.painter()
+                    .rect_filled(fill, 2.0, Color32::from_rgb(150, 170, 200));
+            }
+        },
+    );
+}
+
 const TITLE_H: f32 = 32.0;
 const RESIZE_PAD: f32 = 5.0;
 const CAPTION_W: f32 = 46.0;
 
-fn title_bar(ctx: &egui::Context, want_open: &mut bool, title_icon: &egui::TextureHandle) {
+fn title_bar(
+    ctx: &egui::Context,
+    want_open: &mut bool,
+    help_open: &mut bool,
+    title_icon: &egui::TextureHandle,
+) {
     egui::TopBottomPanel::top("title")
         .exact_height(TITLE_H)
         .frame(
@@ -180,7 +426,7 @@ fn title_bar(ctx: &egui::Context, want_open: &mut bool, title_icon: &egui::Textu
             let bar = ui.max_rect();
             let btn_band = bar.with_min_x(bar.right() - CAPTION_W * 3.0);
             let drag_rect = bar
-                .with_min_x(bar.left() + 210.0)
+                .with_min_x(bar.left() + 300.0)
                 .with_max_x(btn_band.left());
             let drag = ui.interact(
                 drag_rect,
@@ -210,6 +456,12 @@ fn title_bar(ctx: &egui::Context, want_open: &mut bool, title_icon: &egui::Textu
                         if ui.button("Open...    Ctrl+O").clicked() {
                             ui.close();
                             *want_open = true;
+                        }
+                    });
+                    ui.menu_button("Help", |ui| {
+                        if ui.button("Controls    F1").clicked() {
+                            ui.close();
+                            *help_open = true;
                         }
                     });
                 },
@@ -421,10 +673,23 @@ impl eframe::App for MeshpadApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title("Meshpad".into()));
         window_resize_borders(ctx);
+        self.poll_open(frame, ctx);
 
         let mut want_open =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O));
-        title_bar(ctx, &mut want_open, &self.title_icon);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+            self.help_open = !self.help_open;
+        }
+        if self.help_open && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.help_open = false;
+        }
+        title_bar(
+            ctx,
+            &mut want_open,
+            &mut self.help_open,
+            &self.title_icon,
+        );
 
         egui::TopBottomPanel::bottom("status")
             .exact_height(22.0)
@@ -457,6 +722,8 @@ impl eframe::App for MeshpadApp {
                 });
             });
 
+        show_controls_help(ctx, &mut self.help_open);
+
         if want_open {
             self.try_open_dialog(frame);
         } else {
@@ -472,15 +739,22 @@ impl eframe::App for MeshpadApp {
                 let avail = ui.available_size();
                 let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
                 let aspect = (rect.width() / rect.height().max(1.0)).max(0.05);
-                if let Some(radius) = self.pending_fit.take() {
-                    self.camera.fit(radius, aspect);
-                    self.tween = None;
+                let busy = self.opening.is_some();
+                let orbiting = !busy && response.dragged_by(PointerButton::Primary);
+                let panning = !busy
+                    && (response.dragged_by(PointerButton::Secondary)
+                        || response.dragged_by(PointerButton::Middle));
+                if !busy {
+                    if let Some(radius) = self.pending_fit.take() {
+                        self.camera.fit(radius, aspect);
+                        self.tween = None;
+                    }
                 }
                 if let Some(scene) = &self.scene {
                     self.camera.distance = self.camera.distance.max(scene.radius * 3.0);
                 }
 
-                if ui.input(|i| i.key_pressed(egui::Key::F)) {
+                if !busy && ui.input(|i| i.key_pressed(egui::Key::F)) {
                     if let Some(scene) = &self.scene {
                         let mut goal = self.camera.clone();
                         goal.fit(scene.radius, aspect);
@@ -490,10 +764,6 @@ impl eframe::App for MeshpadApp {
                         }
                     }
                 }
-
-                let orbiting = response.dragged_by(PointerButton::Primary);
-                let panning = response.dragged_by(PointerButton::Secondary)
-                    || response.dragged_by(PointerButton::Middle);
                 if orbiting {
                     self.tween = None;
                     self.camera
@@ -506,7 +776,7 @@ impl eframe::App for MeshpadApp {
                         Vec2::new(rect.width(), rect.height()),
                     );
                 }
-                if response.hovered() {
+                if !busy && response.hovered() {
                     let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                     if scroll.abs() > 0.0 {
                         self.tween = None;
@@ -523,7 +793,7 @@ impl eframe::App for MeshpadApp {
                     }
                 }
 
-                if self.scene.is_some() && response.clicked() {
+                if !busy && self.scene.is_some() && response.clicked() {
                     let (view, _, _) = self.camera.view_proj(aspect);
                     if let Some(pos) = response.interact_pointer_pos() {
                         if let Some(hit) = view_cube::pick(view, rect, pos) {
@@ -579,14 +849,36 @@ impl eframe::App for MeshpadApp {
                 }
 
                 let dropping = hover_dropping(ctx);
-                if self.scene.is_none() {
+                if let Some(opening) = &self.opening {
+                    let (frac, stage) = match opening {
+                        Opening::Parse(job) => (job.probe.fraction(), "Reading"),
+                        Opening::Gpu(up) => {
+                            let f = if up.soup.positions.is_empty() {
+                                1.0
+                            } else {
+                                up.next as f32 / up.soup.positions.len() as f32
+                            };
+                            (f, "Uploading")
+                        }
+                    };
+                    let name = self.title_file.as_deref().unwrap_or("mesh");
+                    paint_opening_overlay(ui, rect, frac, stage, name);
+                } else if self.scene.is_none() {
                     if !dropping {
+                        let c = rect.center();
                         ui.painter().text(
-                            rect.center(),
+                            c - egui::vec2(0.0, 10.0),
                             egui::Align2::CENTER_CENTER,
                             "Drop a file, or File -> Open",
                             egui::FontId::proportional(16.0),
                             Color32::from_gray(130),
+                        );
+                        ui.painter().text(
+                            c + egui::vec2(0.0, 14.0),
+                            egui::Align2::CENTER_CENTER,
+                            "Help / F1 for camera controls",
+                            egui::FontId::proportional(13.0),
+                            Color32::from_gray(110),
                         );
                     }
                 } else if !dropping {

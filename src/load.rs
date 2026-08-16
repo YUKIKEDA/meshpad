@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
-use crate::mesh::{bounds_to_soup, ParsedMesh, TriangleSoup};
+use crate::mesh::{bounds_to_soup, LoadProbe, ParsedMesh, TriangleSoup};
 use crate::nas;
 use crate::open::{self, MeshKind};
 use crate::stl;
@@ -22,26 +22,64 @@ use crate::stl;
 /// let _ = (soup.triangle_count(), warnings.len());
 /// ```
 pub fn load_paths(paths: &[impl AsRef<Path>]) -> Result<(TriangleSoup, Vec<String>)> {
+    load_paths_at(paths, None)
+}
+
+/// [`load_paths`] と同じ結合。`probe` があればバイト進捗を書き、取り消しなら中断する。
+pub(crate) fn load_paths_at(
+    paths: &[impl AsRef<Path>],
+    probe: Option<&LoadProbe>,
+) -> Result<(TriangleSoup, Vec<String>)> {
     let mut acc = ParsedMesh::empty();
     let mut warnings = Vec::new();
+    let mut base = 0u64;
+    if let Some(p) = probe {
+        let total: u64 = paths
+            .iter()
+            .map(|q| std::fs::metadata(q.as_ref()).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        p.total.store(total.max(1), std::sync::atomic::Ordering::Relaxed);
+        p.report(0);
+    }
     for p in paths {
+        if probe.is_some_and(LoadProbe::is_cancelled) {
+            bail!("cancelled");
+        }
         let p = p.as_ref();
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         match open::mesh_kind(p) {
-            Some(MeshKind::Stl) => match stl::load_parsed(p) {
+            Some(MeshKind::Stl) => match stl::load_parsed_at(p, probe, base) {
                 Ok(mesh) => acc.absorb(mesh),
-                Err(e) => warnings.push(format!("{}: {e}", p.display())),
+                Err(e) => {
+                    if probe.is_some_and(LoadProbe::is_cancelled) {
+                        bail!("cancelled");
+                    }
+                    warnings.push(format!("{}: {e}", p.display()));
+                }
             },
-            Some(MeshKind::Nas) => match nas::load_nas(p) {
+            Some(MeshKind::Nas) => match nas::load_nas_at(p, probe, base) {
                 Ok((mesh, nas_warnings)) => {
                     for w in nas_warnings {
                         warnings.push(format!("{}: {w}", p.display()));
                     }
                     acc.absorb(mesh);
                 }
-                Err(e) => warnings.push(format!("{}: {e}", p.display())),
+                Err(e) => {
+                    if probe.is_some_and(LoadProbe::is_cancelled) {
+                        bail!("cancelled");
+                    }
+                    warnings.push(format!("{}: {e}", p.display()));
+                }
             },
             None => warnings.push(format!("{}: unsupported extension", p.display())),
         }
+        base = base.saturating_add(size);
+        if let Some(pr) = probe {
+            pr.report(base);
+        }
+    }
+    if probe.is_some_and(LoadProbe::is_cancelled) {
+        bail!("cancelled");
     }
     if acc.positions.is_empty() {
         let detail = if warnings.is_empty() {
