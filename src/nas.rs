@@ -2,22 +2,29 @@
 //!
 //! 対象カードは `GRID` / `CTRIA3` / `CQUAD4` / `CTETRA` / `CHEXA`。`cp ≠ 0` の節点は捨てて件数を警告する。
 //! `CORD*` は読まない。未知カードは飛ばして種類と件数を出す。体積の内部面は出さない。
+//! フィールドは mmap 上のスライスから数値化する。シェル要素は面の重複カウントをしない。
+//! カード列挙の中間ベクタは持たず、走査中に GRID 表と要素節点だけ残す。
+//! 表は Fx ハッシュ。体積面の巻きは置換番号、初回挿入で容量を予約する。
 //!
 //! 小さいファイルはこのマイルストーンでは点群を出さず、外皮まで同期で載せる。
 //! 点群先行は走査を裏に回す C-lite 側。
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use glam::Vec3;
 use memmap2::Mmap;
-use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
-use crate::mesh::ParsedMesh;
+use crate::mesh::{bounds_to_soup, ParsedMesh, TriangleSoup};
 
-/// これ以上の論理カードはパースを Rayon で分割する。
-const PAR_CARDS: usize = 10_000;
+const MAX_FIELDS: usize = 16;
+
+type Map<K, V> = FxHashMap<K, V>;
+
+fn map_with_cap<K, V>(cap: usize) -> Map<K, V> {
+    Map::with_capacity_and_hasher(cap, Default::default())
+}
 
 /// 1 ファイルを mmap して NAS 外皮へ展開する。
 ///
@@ -29,44 +36,96 @@ const PAR_CARDS: usize = 10_000;
 pub(crate) fn load_nas(path: &Path) -> Result<(ParsedMesh, Vec<String>)> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }.with_context(|| format!("mmap {}", path.display()))?;
-    parse_nas(&mmap)
+    parse_nas_mesh(&mmap)
 }
 
-/// バイト列を bulk として解釈し、外皮三角形を返す。
+/// バイト列を bulk として解釈し、外皮の三角形スープを返す。
 ///
 /// `BEGIN BULK` は無くてよい。継続行は先頭 8 桁が空、`+`、`*`。
+/// 位置はファイル座標のまま（中心化しない）。
 ///
 /// # Errors
 ///
 /// 外皮三角形が 1 枚も無いとき。診断（`cp != 0`、未知カードなど）があればエラー文に含める。
-pub(crate) fn parse_nas(bytes: &[u8]) -> Result<(ParsedMesh, Vec<String>)> {
-    let cards = logical_cards(bytes);
-    let parsed: Vec<ParsedCard> = if cards.len() >= PAR_CARDS {
-        cards.par_iter().map(parse_card).collect()
-    } else {
-        cards.iter().map(parse_card).collect()
+///
+/// # Examples
+///
+/// ```ignore
+/// let (soup, warnings) = meshpad::nas::parse_nas(bytes)?;
+/// let _ = (soup.triangle_count(), warnings.len());
+/// ```
+pub fn parse_nas(bytes: &[u8]) -> Result<(TriangleSoup, Vec<String>)> {
+    let (mesh, warnings) = parse_nas_mesh(bytes)?;
+    Ok((bounds_to_soup(mesh.positions, mesh.min, mesh.max), warnings))
+}
+
+fn parse_nas_mesh(bytes: &[u8]) -> Result<(ParsedMesh, Vec<String>)> {
+    finish(scan(bytes))
+}
+
+struct Card<'a> {
+    name: &'a [u8],
+    wide: bool,
+    n: usize,
+    fields: [&'a [u8]; MAX_FIELDS],
+}
+
+impl<'a> Card<'a> {
+    fn new() -> Self {
+        Self {
+            name: b"",
+            wide: false,
+            n: 0,
+            fields: [&b""[..]; MAX_FIELDS],
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    fn push(&mut self, field: &'a [u8]) {
+        if self.n < MAX_FIELDS {
+            self.fields[self.n] = field;
+            self.n += 1;
+        }
+    }
+
+    fn get(&self, i: usize) -> &'a [u8] {
+        if i < self.n {
+            self.fields[i]
+        } else {
+            b""
+        }
+    }
+}
+
+struct Acc {
+    est_faces: usize,
+    reserved_tri: bool,
+    reserved_quad: bool,
+    grids: Map<u32, [f32; 3]>,
+    shells: Vec<[u32; 3]>,
+    tri_faces: Map<[u32; 3], FaceHit>,
+    quad_faces: Map<[u32; 4], FaceHit>,
+    skipped_cp: u32,
+    unknown: Map<String, u32>,
+}
+
+fn scan(bytes: &[u8]) -> Acc {
+    let est = bytes.len() / 48 + 8;
+    let mut acc = Acc {
+        est_faces: bytes.len() / 50 + 8,
+        reserved_tri: false,
+        reserved_quad: false,
+        grids: map_with_cap(est / 2 + 8),
+        shells: Vec::with_capacity(est / 2 + 8),
+        tri_faces: Map::default(),
+        quad_faces: Map::default(),
+        skipped_cp: 0,
+        unknown: Map::default(),
     };
-    assemble(parsed)
-}
-
-struct LogicalCard {
-    name: String,
-    fields: Vec<String>,
-}
-
-enum ParsedCard {
-    Grid { id: u32, cp: u32, xyz: [f32; 3] },
-    Ctria3([u32; 3]),
-    Cquad4([u32; 4]),
-    Ctetra([u32; 4]),
-    Chexa([u32; 8]),
-    Unknown(String),
-    Skip,
-}
-
-fn logical_cards(bytes: &[u8]) -> Vec<LogicalCard> {
-    let mut out = Vec::new();
-    let mut cur: Option<LogicalCard> = None;
+    let mut cur = Card::new();
     let mut i = 0;
     while i < bytes.len() {
         let start = i;
@@ -86,91 +145,82 @@ fn logical_cards(bytes: &[u8]) -> Vec<LogicalCard> {
         if trim_ascii(line).is_empty() {
             continue;
         }
-        let (name, wide, fields) = line_fields(line);
-        if is_cont(&name) {
-            if let Some(card) = cur.as_mut() {
-                let more = if card.name.ends_with('*') || wide {
-                    fields_wide(line)
-                } else {
-                    fields
-                };
-                card.fields.extend(more);
+        let csv = line.contains(&b',');
+        let name = if csv {
+            trim_ascii(line.split(|&b| b == b',').next().unwrap_or(b""))
+        } else {
+            trim_ascii(&line[..line.len().min(8)])
+        };
+        if is_cont(name) {
+            if !cur.name.is_empty() {
+                let wide = cur.wide || name.ends_with(b"*") || name == b"*";
+                append_fields(&mut cur, line, csv, wide);
             }
             continue;
         }
-        if let Some(card) = cur.take() {
-            out.push(strip_star(card));
-        }
-        if ignore_name(&name) {
+        flush_card(&mut cur, &mut acc);
+        if ignore_name(name) {
             continue;
         }
-        cur = Some(LogicalCard { name, fields });
+        cur.name = name;
+        let wide = name.ends_with(b"*");
+        cur.wide = wide;
+        append_fields(&mut cur, line, csv, wide);
     }
-    if let Some(card) = cur.take() {
-        out.push(strip_star(card));
+    flush_card(&mut cur, &mut acc);
+    acc
+}
+
+fn flush_card(card: &mut Card<'_>, acc: &mut Acc) {
+    if card.name.is_empty() {
+        return;
     }
-    out
+    ingest_card(card, acc);
+    card.clear();
 }
 
-fn strip_star(mut card: LogicalCard) -> LogicalCard {
-    if let Some(trimmed) = card.name.strip_suffix('*') {
-        card.name = trimmed.to_string();
+fn append_fields<'a>(card: &mut Card<'a>, line: &'a [u8], csv: bool, wide: bool) {
+    if csv {
+        let mut parts = line.split(|&b| b == b',');
+        let _name = parts.next();
+        for part in parts {
+            card.push(trim_ascii(part));
+        }
+        return;
     }
-    card
-}
-
-fn is_cont(name: &str) -> bool {
-    name.is_empty() || name.starts_with('+') || name == "*" || name.starts_with('*')
-}
-
-fn ignore_name(name: &str) -> bool {
-    matches!(
-        name,
-        "ENDDATA" | "BEGIN" | "CEND" | "SOL" | "TIME" | "PARAM" | "INCLUDE" | "ID" | "ASSIGN"
-    )
-}
-
-fn line_fields(line: &[u8]) -> (String, bool, Vec<String>) {
-    if line.contains(&b',') {
-        let text = String::from_utf8_lossy(line);
-        let mut parts = text.split(',').map(|s| s.trim().to_string());
-        let name = parts.next().unwrap_or_default();
-        return (name, false, parts.collect());
-    }
-    let name = field_text(&line[..line.len().min(8)]);
-    let wide = name.ends_with('*') || name == "*";
-    let fields = if wide {
-        fields_wide(line)
-    } else {
-        fields_small(line)
-    };
-    (name, wide, fields)
-}
-
-fn fields_small(line: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
+    let width = if wide { 16 } else { 8 };
+    let limit = if wide { 72 } else { 80 };
     let mut off = 8;
-    while off < line.len() && off < 80 {
-        let end = (off + 8).min(line.len());
-        out.push(field_text(&line[off..end]));
+    while off < line.len() && off < limit && card.n < MAX_FIELDS {
+        let end = (off + width).min(line.len()).min(limit);
+        card.push(trim_ascii(&line[off..end]));
         off = end;
     }
-    out
 }
 
-fn fields_wide(line: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut off = 8;
-    while off < line.len() && off < 72 {
-        let end = (off + 16).min(line.len());
-        out.push(field_text(&line[off..end]));
-        off = end;
-    }
-    out
+fn is_cont(name: &[u8]) -> bool {
+    name.is_empty() || name[0] == b'+' || name[0] == b'*'
 }
 
-fn field_text(s: &[u8]) -> String {
-    String::from_utf8_lossy(trim_ascii(s)).into_owned()
+fn ignore_name(name: &[u8]) -> bool {
+    let n = strip_star(name);
+    eq_ci(n, b"ENDDATA")
+        || eq_ci(n, b"BEGIN")
+        || eq_ci(n, b"CEND")
+        || eq_ci(n, b"SOL")
+        || eq_ci(n, b"TIME")
+        || eq_ci(n, b"PARAM")
+        || eq_ci(n, b"INCLUDE")
+        || eq_ci(n, b"ID")
+        || eq_ci(n, b"ASSIGN")
+}
+
+fn strip_star(name: &[u8]) -> &[u8] {
+    name.strip_suffix(b"*").unwrap_or(name)
+}
+
+fn eq_ci(a: &[u8], b: &[u8]) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 fn trim_ascii(s: &[u8]) -> &[u8] {
@@ -186,86 +236,128 @@ fn trim_ascii(s: &[u8]) -> &[u8] {
     &s[start..end]
 }
 
-fn parse_card(card: &LogicalCard) -> ParsedCard {
-    match card.name.to_ascii_uppercase().as_str() {
-        "GRID" => parse_grid(&card.fields),
-        "CTRIA3" => parse_nids(&card.fields, 3)
-            .map(ParsedCard::Ctria3)
-            .unwrap_or(ParsedCard::Skip),
-        "CQUAD4" => parse_nids(&card.fields, 4)
-            .map(ParsedCard::Cquad4)
-            .unwrap_or(ParsedCard::Skip),
-        "CTETRA" => parse_nids(&card.fields, 4)
-            .map(ParsedCard::Ctetra)
-            .unwrap_or(ParsedCard::Skip),
-        "CHEXA" => parse_nids(&card.fields, 8)
-            .map(ParsedCard::Chexa)
-            .unwrap_or(ParsedCard::Skip),
-        "PSOLID" | "PSHELL" | "MAT1" | "MAT2" | "SPC" | "SPC1" | "LOAD" | "FORCE" | "MOMENT"
-        | "MPC" | "EIGR" | "EIGRL" => ParsedCard::Skip,
-        _ => ParsedCard::Unknown(card.name.clone()),
+fn ingest_card(card: &Card<'_>, acc: &mut Acc) {
+    let name = strip_star(card.name);
+    if eq_ci(name, b"GRID") {
+        ingest_grid(card, acc);
+        return;
     }
+    if eq_ci(name, b"CTRIA3") {
+        if let Some(ids) = parse_nids(card, 3) {
+            acc.shells.push(ids);
+        }
+        return;
+    }
+    if eq_ci(name, b"CQUAD4") {
+        if let Some(n) = parse_nids::<4>(card, 4) {
+            acc.shells.push([n[0], n[1], n[2]]);
+            acc.shells.push([n[0], n[2], n[3]]);
+        }
+        return;
+    }
+    if eq_ci(name, b"CTETRA") {
+        if let Some(n) = parse_nids::<4>(card, 4) {
+            add_tri(acc, [n[0], n[1], n[2]]);
+            add_tri(acc, [n[0], n[3], n[1]]);
+            add_tri(acc, [n[1], n[3], n[2]]);
+            add_tri(acc, [n[2], n[3], n[0]]);
+        }
+        return;
+    }
+    if eq_ci(name, b"CHEXA") {
+        if let Some(n) = parse_nids::<8>(card, 8) {
+            add_quad(acc, [n[0], n[1], n[2], n[3]]);
+            add_quad(acc, [n[4], n[7], n[6], n[5]]);
+            add_quad(acc, [n[0], n[4], n[5], n[1]]);
+            add_quad(acc, [n[1], n[5], n[6], n[2]]);
+            add_quad(acc, [n[2], n[6], n[7], n[3]]);
+            add_quad(acc, [n[3], n[7], n[4], n[0]]);
+        }
+        return;
+    }
+    if eq_ci(name, b"PSOLID")
+        || eq_ci(name, b"PSHELL")
+        || eq_ci(name, b"MAT1")
+        || eq_ci(name, b"MAT2")
+        || eq_ci(name, b"SPC")
+        || eq_ci(name, b"SPC1")
+        || eq_ci(name, b"LOAD")
+        || eq_ci(name, b"FORCE")
+        || eq_ci(name, b"MOMENT")
+        || eq_ci(name, b"MPC")
+        || eq_ci(name, b"EIGR")
+        || eq_ci(name, b"EIGRL")
+    {
+        return;
+    }
+    *acc.unknown
+        .entry(String::from_utf8_lossy(name).into_owned())
+        .or_insert(0) += 1;
 }
 
-fn parse_grid(fields: &[String]) -> ParsedCard {
-    let Some(id) = parse_u32(fields.first().map(|s| s.as_str()).unwrap_or("")) else {
-        return ParsedCard::Skip;
+fn ingest_grid(card: &Card<'_>, acc: &mut Acc) {
+    let Some(id) = parse_u32(card.get(0)) else {
+        return;
     };
-    let cp = fields
-        .get(1)
-        .and_then(|s| if s.is_empty() { Some(0) } else { parse_u32(s) })
-        .unwrap_or(0);
-    let Some(x) = fields.get(2).and_then(|s| parse_nas_f32(s)) else {
-        return ParsedCard::Skip;
+    let cp = if card.get(1).is_empty() {
+        0
+    } else {
+        parse_u32(card.get(1)).unwrap_or(0)
     };
-    let Some(y) = fields.get(3).and_then(|s| parse_nas_f32(s)) else {
-        return ParsedCard::Skip;
+    let Some(x) = parse_nas_f32(card.get(2)) else {
+        return;
     };
-    let Some(z) = fields.get(4).and_then(|s| parse_nas_f32(s)) else {
-        return ParsedCard::Skip;
+    let Some(y) = parse_nas_f32(card.get(3)) else {
+        return;
     };
-    ParsedCard::Grid {
-        id,
-        cp,
-        xyz: [x, y, z],
+    let Some(z) = parse_nas_f32(card.get(4)) else {
+        return;
+    };
+    if cp != 0 {
+        acc.skipped_cp += 1;
+        return;
     }
+    acc.grids.insert(id, [x, y, z]);
 }
 
-fn parse_nids<const N: usize>(fields: &[String], need: usize) -> Option<[u32; N]> {
+fn parse_nids<const N: usize>(card: &Card<'_>, need: usize) -> Option<[u32; N]> {
     debug_assert_eq!(N, need);
-    let mut ids = [0u32; N];
-    // EID, PID, then nodes
-    let nodes = fields.get(2..)?;
-    if nodes.len() < need {
+    if card.n < 2 + need {
         return None;
     }
-    for (i, f) in nodes.iter().take(need).enumerate() {
-        ids[i] = parse_u32(f)?;
-        if ids[i] == 0 {
+    let mut ids = [0u32; N];
+    for (i, slot) in ids.iter_mut().enumerate() {
+        let id = parse_u32(card.get(2 + i))?;
+        if id == 0 {
             return None;
         }
+        *slot = id;
     }
     Some(ids)
 }
 
-fn parse_u32(s: &str) -> Option<u32> {
-    let t = s.trim();
-    if t.is_empty() {
+fn parse_u32(s: &[u8]) -> Option<u32> {
+    if s.is_empty() {
         return None;
     }
-    t.parse().ok()
+    let mut n = 0u32;
+    for &b in s {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add((b - b'0') as u32)?;
+    }
+    Some(n)
 }
 
-fn parse_nas_f32(s: &str) -> Option<f32> {
-    let t = s.trim();
-    if t.is_empty() {
+fn parse_nas_f32(s: &[u8]) -> Option<f32> {
+    if s.is_empty() {
         return None;
     }
-    let b = t.as_bytes();
     let mut e_at = None;
-    for i in 1..b.len() {
-        if b[i] == b'+' || b[i] == b'-' {
-            let p = b[i - 1];
+    for i in 1..s.len() {
+        if s[i] == b'+' || s[i] == b'-' {
+            let p = s[i - 1];
             if p != b'e' && p != b'E' && (p.is_ascii_digit() || p == b'.') {
                 e_at = Some(i);
                 break;
@@ -273,75 +365,46 @@ fn parse_nas_f32(s: &str) -> Option<f32> {
         }
     }
     if let Some(i) = e_at {
-        let mut tmp = String::with_capacity(t.len() + 1);
-        tmp.push_str(&t[..i]);
-        tmp.push('e');
-        tmp.push_str(&t[i..]);
-        return fast_float2::parse::<f32, _>(tmp.as_str()).ok();
+        let mut tmp = [0u8; 48];
+        if i + 1 + (s.len() - i) > tmp.len() {
+            return None;
+        }
+        tmp[..i].copy_from_slice(&s[..i]);
+        tmp[i] = b'e';
+        tmp[i + 1..i + 1 + s.len() - i].copy_from_slice(&s[i..]);
+        return fast_float2::parse::<f32, _>(&tmp[..s.len() + 1]).ok();
     }
-    fast_float2::parse::<f32, _>(t).ok()
+    fast_float2::parse::<f32, _>(s).ok()
 }
 
-fn assemble(cards: Vec<ParsedCard>) -> Result<(ParsedMesh, Vec<String>)> {
-    let mut grids: HashMap<u32, [f32; 3]> = HashMap::new();
-    let mut skipped_cp = 0u32;
-    let mut unknown: HashMap<String, u32> = HashMap::new();
+fn finish(acc: Acc) -> Result<(ParsedMesh, Vec<String>)> {
+    let Acc {
+        grids,
+        shells,
+        tri_faces,
+        quad_faces,
+        skipped_cp,
+        unknown,
+        ..
+    } = acc;
     let mut missing = 0u32;
-    let mut tri_faces: HashMap<[u32; 3], FaceHit> = HashMap::new();
-    let mut quad_faces: HashMap<[u32; 4], FaceHit> = HashMap::new();
-
-    for card in cards {
-        match card {
-            ParsedCard::Grid { id, cp, xyz } => {
-                if cp != 0 {
-                    skipped_cp += 1;
-                    continue;
-                }
-                grids.insert(id, xyz);
-            }
-            ParsedCard::Ctria3(n) => add_tri(&mut tri_faces, n),
-            ParsedCard::Cquad4(n) => add_quad(&mut quad_faces, n),
-            ParsedCard::Ctetra(n) => {
-                add_tri(&mut tri_faces, [n[0], n[1], n[2]]);
-                add_tri(&mut tri_faces, [n[0], n[3], n[1]]);
-                add_tri(&mut tri_faces, [n[1], n[3], n[2]]);
-                add_tri(&mut tri_faces, [n[2], n[3], n[0]]);
-            }
-            ParsedCard::Chexa(n) => {
-                add_quad(&mut quad_faces, [n[0], n[1], n[2], n[3]]);
-                add_quad(&mut quad_faces, [n[4], n[7], n[6], n[5]]);
-                add_quad(&mut quad_faces, [n[0], n[4], n[5], n[1]]);
-                add_quad(&mut quad_faces, [n[1], n[5], n[6], n[2]]);
-                add_quad(&mut quad_faces, [n[2], n[6], n[7], n[3]]);
-                add_quad(&mut quad_faces, [n[3], n[7], n[4], n[0]]);
-            }
-            ParsedCard::Unknown(name) => {
-                *unknown.entry(name).or_insert(0) += 1;
-            }
-            ParsedCard::Skip => {}
-        }
-    }
-
     let mut mesh = ParsedMesh::empty();
-    for hit in tri_faces.into_values() {
-        if hit.count != 1 || hit.wind.len() < 3 {
-            continue;
-        }
-        push_tri(
-            &mut mesh,
-            &grids,
-            [hit.wind[0], hit.wind[1], hit.wind[2]],
-            &mut missing,
-        );
+    mesh.positions
+        .reserve(shells.len() * 3 + tri_faces.len() * 3 + quad_faces.len() * 6);
+    for ids in shells {
+        push_tri(&mut mesh, &grids, ids, &mut missing);
     }
-    for hit in quad_faces.into_values() {
-        if hit.count != 1 || hit.wind.len() < 4 {
+    for (key, hit) in tri_faces {
+        if hit.count != 1 {
             continue;
         }
-        let a = hit.wind[0];
-        let b = hit.wind[1];
-        let c = hit.wind[2];
-        let d = hit.wind[3];
+        push_tri(&mut mesh, &grids, unrank_perm(&key, hit.perm), &mut missing);
+    }
+    for (key, hit) in quad_faces {
+        if hit.count != 1 {
+            continue;
+        }
+        let [a, b, c, d] = unrank_perm(&key, hit.perm);
         push_tri(&mut mesh, &grids, [a, b, c], &mut missing);
         push_tri(&mut mesh, &grids, [a, c, d], &mut missing);
     }
@@ -373,38 +436,107 @@ fn assemble(cards: Vec<ParsedCard>) -> Result<(ParsedMesh, Vec<String>)> {
 }
 
 struct FaceHit {
-    wind: Vec<u32>,
-    count: u32,
+    perm: u8,
+    count: u8,
 }
 
-fn add_tri(map: &mut HashMap<[u32; 3], FaceHit>, n: [u32; 3]) {
+fn fact(n: usize) -> u8 {
+    match n {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 6,
+        4 => 24,
+        _ => 1,
+    }
+}
+
+fn rank_perm<const N: usize>(sorted: &[u32; N], orig: &[u32; N]) -> u8 {
+    debug_assert!(N <= 4);
+    let mut used = [false; 4];
+    let mut rank = 0u8;
+    for i in 0..N {
+        let mut chosen = None;
+        for j in 0..N {
+            if !used[j] && sorted[j] == orig[i] {
+                chosen = Some(j);
+                break;
+            }
+        }
+        let Some(j) = chosen else {
+            return 0;
+        };
+        let mut smaller = 0u8;
+        for k in 0..j {
+            if !used[k] {
+                smaller += 1;
+            }
+        }
+        used[j] = true;
+        rank += smaller * fact(N - 1 - i);
+    }
+    rank
+}
+
+fn unrank_perm<const N: usize>(sorted: &[u32; N], mut rank: u8) -> [u32; N] {
+    debug_assert!(N <= 4);
+    let mut avail = [true; 4];
+    let mut out = [0u32; N];
+    for i in 0..N {
+        let f = fact(N - 1 - i);
+        let mut skip = if f == 0 { 0 } else { rank / f };
+        rank = if f == 0 { 0 } else { rank % f };
+        for j in 0..N {
+            if !avail[j] {
+                continue;
+            }
+            if skip == 0 {
+                avail[j] = false;
+                out[i] = sorted[j];
+                break;
+            }
+            skip -= 1;
+        }
+    }
+    out
+}
+
+fn add_tri(acc: &mut Acc, n: [u32; 3]) {
+    if !acc.reserved_tri {
+        acc.reserved_tri = true;
+        acc.tri_faces.reserve(acc.est_faces);
+    }
     let mut key = n;
     key.sort_unstable();
-    map.entry(key)
-        .and_modify(|h| h.count += 1)
-        .or_insert(FaceHit {
-            wind: n.to_vec(),
-            count: 1,
-        });
+    let perm = rank_perm(&key, &n);
+    acc.tri_faces
+        .entry(key)
+        .and_modify(|h| {
+            if h.count < 2 {
+                h.count += 1;
+            }
+        })
+        .or_insert(FaceHit { perm, count: 1 });
 }
 
-fn add_quad(map: &mut HashMap<[u32; 4], FaceHit>, n: [u32; 4]) {
+fn add_quad(acc: &mut Acc, n: [u32; 4]) {
+    if !acc.reserved_quad {
+        acc.reserved_quad = true;
+        acc.quad_faces.reserve(acc.est_faces);
+    }
     let mut key = n;
     key.sort_unstable();
-    map.entry(key)
-        .and_modify(|h| h.count += 1)
-        .or_insert(FaceHit {
-            wind: n.to_vec(),
-            count: 1,
-        });
+    let perm = rank_perm(&key, &n);
+    acc.quad_faces
+        .entry(key)
+        .and_modify(|h| {
+            if h.count < 2 {
+                h.count += 1;
+            }
+        })
+        .or_insert(FaceHit { perm, count: 1 });
 }
 
-fn push_tri(
-    mesh: &mut ParsedMesh,
-    grids: &HashMap<u32, [f32; 3]>,
-    ids: [u32; 3],
-    missing: &mut u32,
-) {
+fn push_tri(mesh: &mut ParsedMesh, grids: &Map<u32, [f32; 3]>, ids: [u32; 3], missing: &mut u32) {
     let Some(a) = grids.get(&ids[0]) else {
         *missing += 1;
         return;
@@ -437,6 +569,18 @@ mod tests {
          PSHELL         1       1     .001\n\
          MAT1           1  2.1+11              .3\n\
          ENDDATA\n"
+    }
+
+    #[test]
+    fn face_perm_roundtrip() {
+        let orig3 = [10u32, 3, 7];
+        let mut key3 = orig3;
+        key3.sort_unstable();
+        assert_eq!(unrank_perm(&key3, rank_perm(&key3, &orig3)), orig3);
+        let orig4 = [9u32, 1, 4, 2];
+        let mut key4 = orig4;
+        key4.sort_unstable();
+        assert_eq!(unrank_perm(&key4, rank_perm(&key4, &orig4)), orig4);
     }
 
     #[test]

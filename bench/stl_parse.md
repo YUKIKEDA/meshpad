@@ -158,7 +158,7 @@ ASCII happy の gpu 44ms は、同じ枚数のバイナリ happy 12ms と食い�
 - 並列化閾値: 250 000 三角形（`src/stl.rs` / `src/gpu.rs`）
 - バイナリチャンク: 16 384 三角形
 
-NAS 未実装。ここの rayon は STL バイナリ展開と GPU の原点引きだけ。
+NAS のパース比較は [nas_parse.md](nas_parse.md)。ここの rayon は STL バイナリ展開と GPU の原点引きだけ。
 
 ## まだやっていないこと
 

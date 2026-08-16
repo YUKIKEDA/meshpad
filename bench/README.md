@@ -33,6 +33,16 @@ cargo bench --bench stl_parse
 
 結果・測り方・妥当性の限界は [stl_parse.md](stl_parse.md)。C-lite の T_proxy 以降はまだ後段。
 
+### パース比較（NAS）
+
+STL と同じハーネス形で、表面（`GRID`+`CTRIA3`）と体積（`CHEXA` / `CTETRA` の外皮）を測る。基準列は `bench/.venv` の pyNastran `read_bdf`（フル BDF。外皮は取らない）。
+
+```text
+cargo bench --bench nas_parse
+```
+
+結果・測り方は [nas_parse.md](nas_parse.md)。点群先行（T_grid）と TEMP 索引はまだ後段。
+
 ## 手元のソース（PLY）
 
 | ファイル                          | 形式      | 頂点       | 三角形     | おおよそ |
@@ -122,5 +132,5 @@ PLY が無いとき: 上の Stanford のページから `bunny` / `happy_recon` 
 
 ## git
 
-追跡する: `bench/scripts/`、`bench/requirements.txt`、`bench/**/README*`、`bench/stl_parse.md`、このファイル。
+追跡する: `bench/scripts/`、`bench/requirements.txt`、`bench/**/README*`、`bench/stl_parse.md`、`bench/nas_parse.md`、このファイル。
 追跡しない: `*.ply` `*.stl` `*.nas`、`derived/`、`local/`、`.venv/`。
