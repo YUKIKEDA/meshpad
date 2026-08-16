@@ -2,7 +2,7 @@
 //!
 //! 頂点はファイル座標のまま載せる。AABB 中心は uniform の `origin` でシェーダが引く。
 //! 全三角形を載せる。1 バッファが [`wgpu::Limits::max_buffer_size`] を超えるときは複数チャンク。
-//! プロキシは空。
+//! プロキシスロットは後段用で、1.0 では空。
 
 use std::num::NonZeroU64;
 
@@ -35,13 +35,13 @@ pub struct GpuChunk {
 /// 描画するシーン。
 ///
 /// 遠景の [`Self::proxy`] と近景の [`Self::chunks`] を分けて持てる。
-/// `proxy` は空。`chunks` は全三角形（バッファ上限で分割することがある）。
+/// 1.0 では `proxy` は空。`chunks` は全三角形（バッファ上限で分割することがある）。
 pub struct SceneGpu {
     /// 元ファイル空間での AABB 中心。シェーダが頂点から引く。
     pub origin: Vec3,
     /// ファイル空間 AABB の外接半径。カメラ距離の下限に使う。
     pub radius: f32,
-    /// 遠景用の粗いメッシュ。無ければ `None`。
+    /// 遠景用の粗いメッシュ。1.0 では使わず常に `None`。
     pub proxy: Option<GpuChunk>,
     /// 全三角形。1 バッファに収まらなければ複数。
     pub chunks: Vec<GpuChunk>,

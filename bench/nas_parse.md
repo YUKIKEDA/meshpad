@@ -1,6 +1,6 @@
 # NAS パース計測（2026-08-16）
 
-C-lite の T_grid / T_skin とは別経路。カード分割・外皮抽出・GPU 載せを壁時計と CPU 割り当てで見る。
+1.0 の全載せ経路。カード分割・外皮抽出・GPU 載せを壁時計と CPU 割り当てで見る。C-lite の T_grid / T_skin は後段。
 基準列 `pynas` は `bench/.venv` の pyNastran `BDF.read_bdf`（フル BDF。外皮抽出はしない）。
 再現: `cargo bench --bench nas_parse`。データが無ければ先に `bench/README.md` の `--nas-only` を生成する。追加の NAS パスは引数で足せる。無いファイルは黙って飛ばす。venv が無ければ `pynas` は `-`。
 
@@ -8,7 +8,7 @@ C-lite の T_grid / T_skin とは別経路。カード分割・外皮抽出・GP
 
 ## 測り方
 
-ハーネスは `benches/nas_parse.rs`（`harness = false`）。Criterion は使わない。プロファイルは `[profile.release]`（`lto = true`, `codegen-units = 1`）を `cargo bench` がそのまま使う。測り方の細部（ウォームアップ、中央値、`GlobalAlloc`）は [stl_parse.md](stl_parse.md) と同じ。`pynas` だけは外部プロセスなので割り当て表に出さない。
+ハーネスは `bench/nas_parse.rs`（`harness = false`）。Criterion は使わない。プロファイルは `[profile.release]`（`lto = true`, `codegen-units = 1`）を `cargo bench` がそのまま使う。測り方の細部（ウォームアップ、中央値、`GlobalAlloc`）は [stl_parse.md](stl_parse.md) と同じ。`pynas` だけは外部プロセスなので割り当て表に出さない。
 
 ### 1 ファイルあたりの手順
 
@@ -151,6 +151,6 @@ GRID 表と面表を標準 SipHash から `rustc-hash` の Fx にする。入力
 
 ## まだやっていないこと
 
-- 走査を列で分ける（T_grid / T_skin の近似）
+- 走査を列で分ける（T_grid / T_skin の近似）は後段
 - 実 CAE（`bench/data/local/`）
-- C-lite の走査中プロキシ
+- C-lite の走査中プロキシ（1.0 の外）

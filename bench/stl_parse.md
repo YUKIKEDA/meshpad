@@ -1,13 +1,13 @@
 # STL パース計測（2026-08-15）
 
-C-lite の T_proxy とは別経路。パース・スープ化・GPU 載せを壁時計と CPU 割り当てで見る。
+C-lite の T_proxy とは別経路（1.0 は全載せ）。パース・スープ化・GPU 載せを壁時計と CPU 割り当てで見る。
 再現: `cargo bench --bench stl_parse`。データが無ければ先に `bench/README.md` のラダーを生成する。追加の STL パスは引数で足せる。無いファイルは黙って飛ばす。
 
 下の表はこのマシン（Windows / DX12）の **1 回分**。ラボ精度ではない。比較とボトルネック特定用。
 
 ## 測り方
 
-ハーネスは `benches/stl_parse.rs`（`harness = false`）。Criterion は使わない。信頼区間や外れ値検出は無い。プロファイルは `[profile.release]`（`lto = true`, `codegen-units = 1`）を `cargo bench` がそのまま使う。
+ハーネスは `bench/stl_parse.rs`（`harness = false`）。Criterion は使わない。信頼区間や外れ値検出は無い。プロファイルは `[profile.release]`（`lto = true`, `codegen-units = 1`）を `cargo bench` がそのまま使う。
 
 ### 1 ファイルあたりの手順
 
@@ -140,7 +140,7 @@ CPU スープはファイル座標のまま。AABB 中心は `origin` に残し�
 | subdiv1 4.4M |  21ms |  33ms |      81ms |                  ~114ms |
 | lucy 28M     | 168ms | 243ms | **782ms** |               **~1.0s** |
 
-lucy では **パースより GPU 載せが支配的**。原点引きの加減算自体は 963 MB を触る帯域の中に埋もれる。シェーダで origin を引いても、頂点 963 MB を載せること自体は残る。次のレバーは「全三角形を一度に載せない」（C-lite の近景 200 万）。2M 三角形なら GPU は数十 ms 規模（happy のほぼ 2 倍）と見てよい。
+lucy では **パースより GPU 載せが支配的**。原点引きの加減算自体は 963 MB を触る帯域の中に埋もれる。シェーダで origin を引いても、頂点 963 MB を載せること自体は残る。1.0 はチャンク分割で上限を越え、フレームあたりの載せ量で UI を止める。近景だけ載せる経路は後段（C-lite）。
 
 ASCII happy の gpu 44ms は、同じ枚数のバイナリ happy 12ms と食い違う。lucy の直後で VRAM が荒れているノイズの可能性が高く、ASCII 固有コストではない。
 
@@ -155,15 +155,14 @@ ASCII happy の gpu 44ms は、同じ枚数のバイナリ happy 12ms と食い�
 
 ## コード側に残した定数
 
-- 並列化閾値: 250 000 三角形（`src/stl.rs` / `src/gpu.rs`）
+- 並列化閾値: 250 000 三角形（`src/stl.rs`）
 - バイナリチャンク: 16 384 三角形
 
-NAS のパース比較は [nas_parse.md](nas_parse.md)。ここの rayon は STL バイナリ展開と GPU の原点引きだけ。
+NAS のパース比較は [nas_parse.md](nas_parse.md)。ここの rayon は STL バイナリ展開だけ。
 
 ## まだやっていないこと
 
-- シェーダ側 origin（CPU の per-vertex 減算をやめる）。帯域律速なので効果は小さい見込み
 - アップロード後に CPU `Vec` を捨てる
-- lucy をプロキシだけ先に載せる（C-lite）
+- lucy をプロキシだけ先に載せる（後段 / C-lite）
 - GPU 時間の安定化（ファイル順・VRAM）
 - RSS / 専用 VRAM カウンタ（`GlobalAlloc` では無理）

@@ -28,6 +28,8 @@ pub struct Camera {
     pub half_height: f32,
     /// 最後にフィットした外接半径。ズーム上限と `F` に使う。
     pub fit_radius: f32,
+    /// 世界の上向き。`false` なら +Z（既定）、`true` なら +Y。
+    pub y_up: bool,
 }
 
 impl Default for Camera {
@@ -38,6 +40,7 @@ impl Default for Camera {
             distance: 4.0,
             half_height: 1.0,
             fit_radius: 1.0,
+            y_up: false,
         }
     }
 }
@@ -179,10 +182,19 @@ impl Camera {
         self.fit(radius, aspect);
     }
 
+    /// 世界の上向き（[`Self::y_up`]）。
+    pub fn world_up(&self) -> Vec3 {
+        if self.y_up {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        }
+    }
+
     /// 指定方向から原点を見る。
     ///
-    /// ズームと注視点は変えない。世界 Z を画面上向きにする。
-    /// 真上・真下（±Z）だけは世界 Y を画面上向きにする。
+    /// ズームと注視点は変えない。[`Self::world_up`] を画面上向きにする。
+    /// 視線がそれと平行なときだけ、もう一方の軸を画面上向きにする。
     ///
     /// # Examples
     ///
@@ -191,7 +203,13 @@ impl Camera {
     /// cam.look_from(glam::Vec3::X);
     /// ```
     pub fn look_from(&mut self, dir: Vec3) {
-        self.look_from_up(dir, Vec3::Z);
+        self.look_from_up(dir, self.world_up());
+    }
+
+    /// 視線方向は保ち、[`Self::world_up`] が画面上に来るよう姿勢だけ入れ直す。
+    pub fn apply_world_up(&mut self) {
+        let dir = self.eye_offset();
+        self.look_from(dir);
     }
 
     /// 指定方向から原点を見る。`hint_up` を画面垂直に保つ。
@@ -456,6 +474,18 @@ mod tests {
         cam.look_from(Vec3::X);
         let dir = cam.eye_offset().normalize();
         assert!((dir - Vec3::X).length() < 1e-4);
+    }
+
+    #[test]
+    fn y_up_look_from_x_aligns_y_with_screen_up() {
+        let mut cam = Camera::default();
+        cam.distance = 1.0;
+        cam.look_from(Vec3::X);
+        assert!((cam.orientation * Vec3::Y).dot(Vec3::Z) > 0.99);
+        cam.y_up = true;
+        cam.apply_world_up();
+        assert!((cam.eye_offset().normalize() - Vec3::X).length() < 1e-3);
+        assert!((cam.orientation * Vec3::Y).dot(Vec3::Y) > 0.99);
     }
 
     #[test]

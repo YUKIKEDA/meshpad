@@ -1,7 +1,7 @@
 //! eframe 上の Meshpad ウィンドウ。
 //!
 //! 起動引数・ドロップ・「ファイル → 開く」のファイル列は、いずれも新しいシーンになる。
-//! `F` で全体フィット。左下のビューキューブで向き＋ズームを揃える。
+//! `F` で全体フィット。`Y` で Y-up / Z-up。左下のビューキューブで向き＋ズームを揃える。
 //! 操作一覧はタイトルの Help、または `F1`。
 
 use std::path::{Path, PathBuf};
@@ -337,6 +337,7 @@ fn show_controls_help(ctx: &egui::Context, open: &mut bool) {
                     help_row(ui, "Middle drag", "Pan");
                     help_row(ui, "Scroll", "Zoom to cursor");
                     help_row(ui, "F", "Fit view");
+                    help_row(ui, "Y", "Toggle Y-up / Z-up");
                     help_row(ui, "Ctrl+O", "Open (replaces scene)");
                     help_row(ui, "Drop files", "Replace scene");
                     help_row(ui, "View cube", "Snap orientation and fit");
@@ -681,6 +682,17 @@ impl eframe::App for MeshpadApp {
         {
             self.help_open = false;
         }
+        if self.opening.is_none()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Y))
+        {
+            self.camera.y_up = !self.camera.y_up;
+            let mut goal = self.camera.clone();
+            goal.apply_world_up();
+            self.tween = CameraTween::toward(&self.camera, &goal);
+            if self.tween.is_none() {
+                self.camera = goal;
+            }
+        }
         title_bar(ctx, &mut want_open, &mut self.help_open, &self.title_icon);
 
         egui::TopBottomPanel::bottom("status")
@@ -695,6 +707,13 @@ impl eframe::App for MeshpadApp {
                     let mut need_sep = false;
                     if let Some(name) = &self.title_file {
                         ui.label(RichText::new(name).color(Color32::from_gray(200)));
+                        need_sep = true;
+                    }
+                    if self.camera.y_up {
+                        if need_sep {
+                            ui.separator();
+                        }
+                        ui.label(RichText::new("Y-up").color(Color32::from_gray(160)));
                         need_sep = true;
                     }
                     if !self.status.is_empty() {
