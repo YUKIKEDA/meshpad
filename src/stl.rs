@@ -167,9 +167,9 @@ fn parse_binary_mesh(bytes: &[u8], probe: Option<&LoadProbe>, base: u64) -> Resu
         positions.set_len(nvert);
     }
     let (min, max) = if count >= PAR_TRIANGLES {
-        unpack_tris_par(recs, &mut positions, probe, base)
+        unpack_tris_par(recs, &mut positions, probe, base)?
     } else {
-        unpack_tris(recs, &mut positions, probe, base)?
+        unpack_tris(recs, &mut positions, probe, Some(base))?
     };
     if cancelled(probe) {
         bail!("cancelled");
@@ -186,17 +186,19 @@ fn unpack_tris(
     recs: &[u8],
     out: &mut [[f32; 3]],
     probe: Option<&LoadProbe>,
-    base: u64,
+    progress_base: Option<u64>,
 ) -> Result<(Vec3, Vec3)> {
     debug_assert_eq!(recs.len() / RECORD, out.len() / 3);
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     for (i, rec) in recs.chunks_exact(RECORD).enumerate() {
-        if i % PAR_TRI_CHUNK == 0 && cancelled(probe) {
-            bail!("cancelled");
-        }
         if i % PAR_TRI_CHUNK == 0 {
-            report(probe, base.saturating_add((i * RECORD) as u64));
+            if cancelled(probe) {
+                bail!("cancelled");
+            }
+            if let Some(base) = progress_base {
+                report(probe, base.saturating_add((i * RECORD) as u64));
+            }
         }
         for v in 0..3 {
             let o = 12 + v * 12;
@@ -217,33 +219,32 @@ fn unpack_tris_par(
     out: &mut [[f32; 3]],
     probe: Option<&LoadProbe>,
     base: u64,
-) -> (Vec3, Vec3) {
+) -> Result<(Vec3, Vec3)> {
+    if cancelled(probe) {
+        bail!("cancelled");
+    }
     let rec_stride = RECORD * PAR_TRI_CHUNK;
     let vert_stride = 3 * PAR_TRI_CHUNK;
     report(probe, base);
-    let bounds: Vec<(Vec3, Vec3)> = recs
+    let bounds: Result<Vec<(Vec3, Vec3)>, anyhow::Error> = recs
         .par_chunks(rec_stride)
         .zip(out.par_chunks_mut(vert_stride))
         .map(|(rec_chunk, vert_chunk)| {
-            match unpack_tris(rec_chunk, vert_chunk, None, 0) {
-                Ok(b) => {
-                    if let Some(p) = probe {
-                        p.done
-                            .fetch_add(rec_chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    b
-                }
-                Err(_) => (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            let b = unpack_tris(rec_chunk, vert_chunk, probe, None)?;
+            if let Some(p) = probe {
+                p.done
+                    .fetch_add(rec_chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
             }
+            Ok::<_, anyhow::Error>(b)
         })
         .collect();
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
-    for (a, b) in bounds {
+    for (a, b) in bounds? {
         min = min.min(a);
         max = max.max(b);
     }
-    (min, max)
+    Ok((min, max))
 }
 
 /// バイト列を ASCII STL として解釈する。
@@ -542,6 +543,26 @@ mod tests {
     #[test]
     fn reject_truncated() {
         assert!(parse_binary_stl(&[0u8; 10]).is_err());
+    }
+
+    #[test]
+    fn unpack_tris_stops_when_cancelled() {
+        let recs = vec![0u8; RECORD];
+        let mut out = vec![[0.0f32; 3]; 3];
+        let probe = LoadProbe::new(1);
+        probe.cancel();
+        let err = unpack_tris(&recs, &mut out, Some(&probe), Some(0)).unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn unpack_tris_par_stops_when_cancelled() {
+        let recs = vec![0u8; RECORD * PAR_TRI_CHUNK];
+        let mut out = vec![[0.0f32; 3]; 3 * PAR_TRI_CHUNK];
+        let probe = LoadProbe::new(1);
+        probe.cancel();
+        let err = unpack_tris_par(&recs, &mut out, Some(&probe), 0).unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
     }
 
     #[test]

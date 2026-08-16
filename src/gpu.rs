@@ -119,7 +119,11 @@ pub(crate) fn verts_per_frame(max_buffer_size: u64) -> usize {
 }
 
 /// `[start, total)` から次に載せる三角形境界の範囲。
-pub(crate) fn next_upload_range(start: usize, total: usize, cap: usize) -> Option<std::ops::Range<usize>> {
+pub(crate) fn next_upload_range(
+    start: usize,
+    total: usize,
+    cap: usize,
+) -> Option<std::ops::Range<usize>> {
     if start >= total || cap < 3 {
         return None;
     }

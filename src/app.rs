@@ -86,10 +86,7 @@ impl MeshpadApp {
         self.pending_fit = None;
         let (files, warnings) = open::expand_open_inputs(paths);
         if files.is_empty() {
-            self.pending_fit = None;
-            self.title_file = None;
-            self.warnings = warnings;
-            self.status = "no mesh could be opened".into();
+            self.abandon_open("no mesh could be opened".into(), warnings);
             return;
         }
 
@@ -132,9 +129,7 @@ impl MeshpadApp {
                 }
             });
         if spawned.is_err() {
-            self.warnings = warnings;
-            self.title_file = None;
-            self.status = "could not start load thread".into();
+            self.abandon_open("could not start load thread".into(), warnings);
             return;
         }
 
@@ -146,6 +141,16 @@ impl MeshpadApp {
             probe,
             started: Instant::now(),
         }));
+    }
+
+    /// 開く操作は既存シーンを置き換える。失敗したら空に戻す。
+    fn abandon_open(&mut self, status: String, warnings: Vec<String>) {
+        self.scene = None;
+        self.pending_fit = None;
+        self.title_file = None;
+        self.opening = None;
+        self.warnings = warnings;
+        self.status = status;
     }
 
     fn poll_open(&mut self, frame: &eframe::Frame, ctx: &egui::Context) {
@@ -167,8 +172,8 @@ impl MeshpadApp {
                     }));
                 }
                 Ok(ParseOut::Err(msg)) => {
-                    self.status = msg;
-                    self.opening = None;
+                    let warnings = std::mem::take(&mut self.warnings);
+                    self.abandon_open(msg, warnings);
                 }
                 Ok(ParseOut::Cancelled) => {
                     self.opening = None;
@@ -179,8 +184,8 @@ impl MeshpadApp {
                     self.opening = Some(Opening::Parse(job));
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.status = "load thread ended".into();
-                    self.opening = None;
+                    let warnings = std::mem::take(&mut self.warnings);
+                    self.abandon_open("load thread ended".into(), warnings);
                 }
             },
             Some(Opening::Gpu(mut up)) => {
@@ -191,7 +196,8 @@ impl MeshpadApp {
                 let cap = gpu::verts_per_frame(rs.device.limits().max_buffer_size);
                 match gpu::next_upload_range(up.next, up.soup.positions.len(), cap) {
                     Some(range) => {
-                        let chunk = gpu::upload_positions(&rs.device, &up.soup.positions[range.clone()]);
+                        let chunk =
+                            gpu::upload_positions(&rs.device, &up.soup.positions[range.clone()]);
                         up.scene.push_chunk(chunk);
                         up.next = range.end;
                         let frac = if up.soup.positions.is_empty() {
@@ -358,18 +364,9 @@ fn help_row(ui: &mut egui::Ui, keys: &str, action: &str) {
     ui.end_row();
 }
 
-fn paint_opening_overlay(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    frac: f32,
-    stage: &str,
-    name: &str,
-) {
-    ui.painter().rect_filled(
-        rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(12, 12, 14, 210),
-    );
+fn paint_opening_overlay(ui: &mut egui::Ui, rect: egui::Rect, frac: f32, stage: &str, name: &str) {
+    ui.painter()
+        .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(12, 12, 14, 210));
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(rect)
@@ -393,8 +390,7 @@ fn paint_opening_overlay(
             ui.add_space(12.0);
             let bar_w = (rect.width() * 0.36).clamp(180.0, 320.0);
             let (bar, _) = ui.allocate_exact_size(egui::vec2(bar_w, 4.0), Sense::hover());
-            ui.painter()
-                .rect_filled(bar, 2.0, Color32::from_gray(42));
+            ui.painter().rect_filled(bar, 2.0, Color32::from_gray(42));
             let fill_w = bar.width() * frac.clamp(0.0, 1.0);
             if fill_w > 0.0 {
                 let fill = egui::Rect::from_min_size(bar.min, egui::vec2(fill_w, bar.height()));
@@ -680,16 +676,12 @@ impl eframe::App for MeshpadApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
             self.help_open = !self.help_open;
         }
-        if self.help_open && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        if self.help_open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.help_open = false;
         }
-        title_bar(
-            ctx,
-            &mut want_open,
-            &mut self.help_open,
-            &self.title_icon,
-        );
+        title_bar(ctx, &mut want_open, &mut self.help_open, &self.title_icon);
 
         egui::TopBottomPanel::bottom("status")
             .exact_height(22.0)

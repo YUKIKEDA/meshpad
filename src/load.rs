@@ -38,7 +38,8 @@ pub(crate) fn load_paths_at(
             .iter()
             .map(|q| std::fs::metadata(q.as_ref()).map(|m| m.len()).unwrap_or(0))
             .sum();
-        p.total.store(total.max(1), std::sync::atomic::Ordering::Relaxed);
+        p.total
+            .store(total.max(1), std::sync::atomic::Ordering::Relaxed);
         p.report(0);
     }
     for p in paths {

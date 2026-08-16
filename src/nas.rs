@@ -63,7 +63,11 @@ pub fn parse_nas(bytes: &[u8]) -> Result<(TriangleSoup, Vec<String>)> {
     Ok((bounds_to_soup(mesh.positions, mesh.min, mesh.max), warnings))
 }
 
-fn parse_nas_mesh(bytes: &[u8], probe: Option<&LoadProbe>, base: u64) -> Result<(ParsedMesh, Vec<String>)> {
+fn parse_nas_mesh(
+    bytes: &[u8],
+    probe: Option<&LoadProbe>,
+    base: u64,
+) -> Result<(ParsedMesh, Vec<String>)> {
     finish(scan(bytes, probe, base), probe)
 }
 
