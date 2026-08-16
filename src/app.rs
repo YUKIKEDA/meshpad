@@ -30,6 +30,8 @@ pub struct MeshpadApp {
     /// 次フレームの実ビューポートで [`Camera::fit`] する半径。
     pending_fit: Option<f32>,
     tween: Option<CameraTween>,
+    /// `Y` 切替の補間中。中断したら [`Camera::apply_world_up`] で姿勢を確定する。
+    world_up_tween: bool,
     status: String,
     warnings: Vec<String>,
     title_file: Option<String>,
@@ -63,6 +65,7 @@ impl MeshpadApp {
             camera: Camera::default(),
             pending_fit: None,
             tween: None,
+            world_up_tween: false,
             status: String::new(),
             warnings: Vec::new(),
             title_file: None,
@@ -82,7 +85,7 @@ impl MeshpadApp {
 
     fn start_open(&mut self, paths: &[PathBuf]) {
         self.opening = None;
-        self.tween = None;
+        self.interrupt_tween();
         self.pending_fit = None;
         let (files, warnings) = open::expand_open_inputs(paths);
         if files.is_empty() {
@@ -141,6 +144,23 @@ impl MeshpadApp {
             probe,
             started: Instant::now(),
         }));
+    }
+
+    /// `Y` 切替の補間を中断したら、フラグに合う姿勢へ確定する。
+    fn interrupt_tween(&mut self) {
+        if self.world_up_tween {
+            self.camera.apply_world_up();
+            self.world_up_tween = false;
+        }
+        self.tween = None;
+    }
+
+    fn start_camera_tween(&mut self, goal: Camera) {
+        self.interrupt_tween();
+        self.tween = CameraTween::toward(&self.camera, &goal);
+        if self.tween.is_none() {
+            self.camera = goal;
+        }
     }
 
     /// 開く操作は既存シーンを置き換える。失敗したら空に戻す。
@@ -685,12 +705,15 @@ impl eframe::App for MeshpadApp {
         if self.opening.is_none()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Y))
         {
+            self.interrupt_tween();
             self.camera.y_up = !self.camera.y_up;
             let mut goal = self.camera.clone();
             goal.apply_world_up();
             self.tween = CameraTween::toward(&self.camera, &goal);
             if self.tween.is_none() {
                 self.camera = goal;
+            } else {
+                self.world_up_tween = true;
             }
         }
         title_bar(ctx, &mut want_open, &mut self.help_open, &self.title_icon);
@@ -757,8 +780,8 @@ impl eframe::App for MeshpadApp {
                         || response.dragged_by(PointerButton::Middle));
                 if !busy {
                     if let Some(radius) = self.pending_fit.take() {
+                        self.interrupt_tween();
                         self.camera.fit(radius, aspect);
-                        self.tween = None;
                     }
                 }
                 if let Some(scene) = &self.scene {
@@ -769,19 +792,16 @@ impl eframe::App for MeshpadApp {
                     if let Some(scene) = &self.scene {
                         let mut goal = self.camera.clone();
                         goal.fit(scene.radius, aspect);
-                        self.tween = CameraTween::toward(&self.camera, &goal);
-                        if self.tween.is_none() {
-                            self.camera = goal;
-                        }
+                        self.start_camera_tween(goal);
                     }
                 }
                 if orbiting {
-                    self.tween = None;
+                    self.interrupt_tween();
                     self.camera
                         .rotate(Vec2::new(response.drag_delta().x, response.drag_delta().y));
                 }
                 if panning {
-                    self.tween = None;
+                    self.interrupt_tween();
                     self.camera.pan(
                         Vec2::new(response.drag_delta().x, response.drag_delta().y),
                         Vec2::new(rect.width(), rect.height()),
@@ -790,7 +810,7 @@ impl eframe::App for MeshpadApp {
                 if !busy && response.hovered() {
                     let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                     if scroll.abs() > 0.0 {
-                        self.tween = None;
+                        self.interrupt_tween();
                         let factor = (0.0015 * -scroll).exp();
                         if let Some(pos) = response.hover_pos() {
                             let ndc = Vec2::new(
@@ -816,10 +836,7 @@ impl eframe::App for MeshpadApp {
                                 let up = hit.snap_up(view_dir, screen_up);
                                 goal.look_from_up(dir, up);
                                 goal.fit(scene.radius, aspect);
-                                self.tween = CameraTween::toward(&self.camera, &goal);
-                                if self.tween.is_none() {
-                                    self.camera = goal;
-                                }
+                                self.start_camera_tween(goal);
                             }
                         }
                     }
@@ -831,6 +848,7 @@ impl eframe::App for MeshpadApp {
                         ctx.request_repaint();
                     } else {
                         self.tween = None;
+                        self.world_up_tween = false;
                     }
                 }
 
