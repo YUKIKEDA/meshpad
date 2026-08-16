@@ -18,6 +18,7 @@ struct VsOut {
 @vertex
 fn vs_main(@location(0) pos: vec3<f32>) -> VsOut {
     var o: VsOut;
+    // 頂点はファイル座標。AABB 中心を引き、巨大座標の float32 ジッタを抑える。
     let p = pos - u.origin;
     o.world = p;
     o.clip = u.view_proj * vec4<f32>(p, 1.0);
@@ -26,6 +27,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> VsOut {
 
 @fragment
 fn fs_main(inp: VsOut) -> @location(0) vec4<f32> {
+    // 法線は頂点に無い。偏微分から面法線を復元する。両面ライトは abs(N·L)。
     let dx = dpdx(inp.world);
     let dy = dpdy(inp.world);
     var n = normalize(cross(dx, dy));

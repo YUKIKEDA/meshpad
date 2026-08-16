@@ -36,6 +36,7 @@ pub struct MeshpadApp {
     warnings: Vec<String>,
     title_file: Option<String>,
     title_icon: egui::TextureHandle,
+    /// パース中または GPU 載せ中。`None` なら操作可能。
     opening: Option<Opening>,
     help_open: bool,
 }
@@ -83,6 +84,10 @@ impl MeshpadApp {
         app
     }
 
+    /// 渡されたパス列で新しい読み込みを始める。
+    ///
+    /// 前の `opening` を先に捨てる（パース中ならジョブの `Drop` がキャンセルする）。
+    /// いま載っている `scene` は成功するまで残す。失敗時だけ `abandon_open`。
     fn start_open(&mut self, paths: &[PathBuf]) {
         self.opening = None;
         self.interrupt_tween();
@@ -196,6 +201,7 @@ impl MeshpadApp {
                     self.abandon_open(msg, warnings);
                 }
                 Ok(ParseOut::Cancelled) => {
+                    // 失敗ではない。abandon_open すると、後から成功したシーンまで消える。
                     self.opening = None;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -261,11 +267,13 @@ impl MeshpadApp {
     }
 }
 
+/// 非同期の開く操作。パースはワーカスレッド、GPU 載せはメインスレッド。
 enum Opening {
     Parse(ParseJob),
     Gpu(GpuUpload),
 }
 
+/// `meshpad-load` スレッドへの待ち。破棄するとプローブをキャンセルする。
 struct ParseJob {
     rx: Receiver<ParseOut>,
     probe: Arc<LoadProbe>,
@@ -284,9 +292,11 @@ enum ParseOut {
         warnings: Vec<String>,
     },
     Err(String),
+    /// 新しい開く操作がこのジョブを捨てた。シーンは変えない。
     Cancelled,
 }
 
+/// フレームあたり数 MB ずつ頂点を載せる途中経過。
 struct GpuUpload {
     soup: TriangleSoup,
     scene: SceneGpu,
@@ -773,6 +783,7 @@ impl eframe::App for MeshpadApp {
                 let avail = ui.available_size();
                 let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
                 let aspect = (rect.width() / rect.height().max(1.0)).max(0.05);
+                // 全載せ完了まで操作しない（1.0 契約）。プロキシ先行は後段。
                 let busy = self.opening.is_some();
                 let orbiting = !busy && response.dragged_by(PointerButton::Primary);
                 let panning = !busy

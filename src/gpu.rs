@@ -26,7 +26,7 @@ struct Uniforms {
     _pad1: f32,
 }
 
-/// GPU 常駐の頂点ブロック。
+/// GPU 常駐の頂点ブロック。位置だけ（12 バイト/頂点）。法線はシェーダ側。
 pub struct GpuChunk {
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
@@ -92,6 +92,7 @@ impl SceneGpu {
     }
 
     fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        // 後段の LOD は proxy を先に描き、近景チャンクを重ねる想定。1.0 では proxy は空。
         if let Some(p) = &self.proxy {
             pass.set_vertex_buffer(0, p.vertex_buffer.slice(..));
             pass.draw(0..p.vertex_count, 0..1);

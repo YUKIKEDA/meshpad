@@ -69,6 +69,8 @@ cargo fmt --all
 
 計測データとハーネスは [`bench/README.md`](bench/README.md) です。巨大 STL/NAS は git に入れていません。
 
+開発者向けの全体設計は [`.dev/architecture.md`](.dev/architecture.md)。製品契約（1.0 の範囲）は [`.dev/project.md`](.dev/project.md)。
+
 ## リリース
 
 `Cargo.toml` の `version` を上げてタグを推します。

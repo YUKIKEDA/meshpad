@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use glam::Vec3;
 
 /// バックグラウンド読み込みの進捗と取り消し。
+///
+/// `total` / `done` はバイト目安（ファイルサイズの合計）。厳密な三角形進捗ではない。
+/// 取り消しは新しい開く操作が前ジョブを捨てたときに立つ。
 pub(crate) struct LoadProbe {
     pub done: AtomicU64,
     pub total: AtomicU64,
@@ -62,6 +65,9 @@ impl TriangleSoup {
     }
 }
 
+/// 1 ファイル分の展開結果。形式によらず位置と AABB だけ持つ。
+///
+/// [`Self::absorb`] でワールド座標のまま連結する。中心化は [`bounds_to_soup`] までしない。
 #[derive(Debug)]
 pub(crate) struct ParsedMesh {
     pub positions: Vec<[f32; 3]>,

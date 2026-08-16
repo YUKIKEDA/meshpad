@@ -60,6 +60,7 @@ fn main() -> eframe::Result<()> {
             .with_icon(icon::viewport_icon())
             .with_drag_and_drop(true),
         wgpu_options,
+        // メッシュの深度は `Renderer` のオフスクリーン側。egui のメインパスには不要。
         depth_buffer: 0,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
