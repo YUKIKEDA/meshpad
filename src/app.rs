@@ -39,6 +39,7 @@ pub struct MeshpadApp {
     /// パース中または GPU 載せ中。`None` なら操作可能。
     opening: Option<Opening>,
     help_open: bool,
+    warnings_open: bool,
 }
 
 impl MeshpadApp {
@@ -77,6 +78,7 @@ impl MeshpadApp {
             ),
             opening: None,
             help_open: false,
+            warnings_open: false,
         };
         if !initial_paths.is_empty() {
             app.start_open(&initial_paths);
@@ -197,8 +199,11 @@ impl MeshpadApp {
                     }));
                 }
                 Ok(ParseOut::Err(msg)) => {
-                    let warnings = std::mem::take(&mut self.warnings);
-                    self.abandon_open(msg, warnings);
+                    let mut warnings = std::mem::take(&mut self.warnings);
+                    if !msg.is_empty() {
+                        warnings.push(msg);
+                    }
+                    self.abandon_open("no mesh could be opened".into(), warnings);
                 }
                 Ok(ParseOut::Cancelled) => {
                     // 失敗ではない。abandon_open すると、後から成功したシーンまで消える。
@@ -339,46 +344,250 @@ fn hover_dropping(ctx: &egui::Context) -> bool {
     ctx.input(|i| !i.raw.hovered_files.is_empty())
 }
 
+fn popup_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::popup(ctx.style().as_ref())
+        .fill(Color32::from_rgb(24, 24, 26))
+        .stroke(Stroke::new(1.0_f32, Color32::from_gray(48)))
+        .inner_margin(egui::Margin::ZERO)
+}
+
+fn compact_popup_header(ui: &mut egui::Ui, title: &str, open: &mut bool) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), POPUP_HEADER_H),
+        Sense::hover(),
+    );
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0_f32, CHROME_LINE),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(title)
+                    .color(Color32::from_gray(210))
+                    .size(13.0),
+            );
+        },
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| {
+            if caption_btn(
+                ui,
+                CaptionIcon::Close,
+                POPUP_HEADER_H,
+                POPUP_HEADER_H,
+                Color32::from_rgb(196, 43, 28),
+            )
+            .clicked()
+            {
+                *open = false;
+            }
+        },
+    );
+}
+
 fn show_controls_help(ctx: &egui::Context, open: &mut bool) {
+    if !*open {
+        return;
+    }
     let screen = ctx.screen_rect();
     let below_title = egui::Rect::from_min_max(
         egui::pos2(screen.left(), screen.top() + TITLE_H),
         screen.max,
     );
     egui::Window::new("Controls")
-        .open(open)
+        .title_bar(false)
+        .movable(false)
         .resizable(false)
         .collapsible(false)
         .constrain_to(below_title)
         .anchor(egui::Align2::RIGHT_TOP, [-12.0, 8.0])
+        .default_width(280.0)
+        .frame(popup_frame(ctx))
+        .show(ctx, |ui| {
+            compact_popup_header(ui, "Controls", open);
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    egui::Grid::new("meshpad.help")
+                        .num_columns(2)
+                        .spacing([20.0, 6.0])
+                        .show(ui, |ui| {
+                            help_row(ui, "Left drag", "Orbit");
+                            help_row(ui, "Right drag", "Pan");
+                            help_row(ui, "Middle drag", "Pan");
+                            help_row(ui, "Scroll", "Zoom to cursor");
+                            help_row(ui, "F", "Fit view");
+                            help_row(ui, "Y", "Toggle Y-up / Z-up");
+                            help_row(ui, "Ctrl+O", "Open (replaces scene)");
+                            help_row(ui, "Drop files", "Replace scene");
+                            help_row(ui, "View cube", "Snap orientation and fit");
+                        });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Esc or F1 to close")
+                            .color(Color32::from_gray(120))
+                            .size(12.0),
+                    );
+                });
+        });
+}
+
+fn show_warnings(ctx: &egui::Context, open: &mut bool, warnings: &[String]) {
+    if !*open || warnings.is_empty() {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let area = egui::Rect::from_min_max(
+        egui::pos2(screen.left(), screen.top() + TITLE_H),
+        egui::pos2(screen.right(), screen.bottom() - STATUS_H),
+    );
+    let max_h = (screen.height() * 0.22).clamp(72.0, 180.0);
+    let index_w = if warnings.len() >= 10 { 28.0 } else { 20.0 };
+    egui::Window::new("Warnings")
+        .title_bar(false)
+        .movable(false)
+        .resizable(false)
+        .collapsible(false)
+        .constrain_to(area)
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -8.0])
+        .default_width(360.0)
+        .frame(popup_frame(ctx))
+        .show(ctx, |ui| {
+            compact_popup_header(ui, "Warnings", open);
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(max_h)
+                        .show(ui, |ui| {
+                            ui.set_max_width(360.0);
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            let row_h =
+                                ui.fonts(|f| f.row_height(&egui::FontId::proportional(13.0)));
+                            for (i, w) in warnings.iter().enumerate() {
+                                ui.horizontal_top(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    ui.add_sized(
+                                        [index_w, row_h],
+                                        egui::Label::new(
+                                            RichText::new(format!("{}.", i + 1))
+                                                .color(Color32::from_gray(140))
+                                                .size(13.0),
+                                        ),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(w).color(WARN_FG).size(13.0),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                            }
+                        });
+                });
+        });
+}
+
+fn status_bar(
+    ctx: &egui::Context,
+    title_file: Option<&str>,
+    y_up: bool,
+    status: &str,
+    warnings: &[String],
+    warnings_open: &mut bool,
+) {
+    egui::TopBottomPanel::bottom("status")
+        .exact_height(STATUS_H)
         .frame(
-            egui::Frame::popup(ctx.style().as_ref())
-                .fill(Color32::from_rgb(24, 24, 26))
-                .stroke(Stroke::new(1.0_f32, Color32::from_gray(48)))
-                .inner_margin(egui::Margin::symmetric(14, 12)),
+            egui::Frame::NONE
+                .fill(CHROME)
+                .inner_margin(egui::Margin::symmetric(10, 0)),
         )
         .show(ctx, |ui| {
-            egui::Grid::new("meshpad.help")
-                .num_columns(2)
-                .spacing([20.0, 6.0])
-                .show(ui, |ui| {
-                    help_row(ui, "Left drag", "Orbit");
-                    help_row(ui, "Right drag", "Pan");
-                    help_row(ui, "Middle drag", "Pan");
-                    help_row(ui, "Scroll", "Zoom to cursor");
-                    help_row(ui, "F", "Fit view");
-                    help_row(ui, "Y", "Toggle Y-up / Z-up");
-                    help_row(ui, "Ctrl+O", "Open (replaces scene)");
-                    help_row(ui, "Drop files", "Replace scene");
-                    help_row(ui, "View cube", "Snap orientation and fit");
-                });
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("Esc or F1 to close")
-                    .color(Color32::from_gray(120))
-                    .size(12.0),
+            let bar = ui.max_rect();
+            ui.painter().hline(
+                bar.x_range(),
+                bar.top() + 0.5,
+                Stroke::new(1.0_f32, CHROME_LINE),
+            );
+
+            let mut left = bar;
+            if !warnings.is_empty() {
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(bar)
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    |ui| {
+                        warning_chip(ui, warnings.len(), warnings_open);
+                        left = left.with_max_x((ui.min_rect().left() - 8.0).max(bar.left()));
+                    },
+                );
+            }
+
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(left)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    let mut need_sep = false;
+                    if let Some(name) = title_file {
+                        ui.add(
+                            egui::Label::new(RichText::new(name).color(Color32::from_gray(200)))
+                                .truncate(),
+                        );
+                        need_sep = true;
+                    }
+                    if y_up {
+                        if need_sep {
+                            ui.separator();
+                        }
+                        ui.label(RichText::new("Y-up").color(Color32::from_gray(160)));
+                        need_sep = true;
+                    }
+                    if !status.is_empty() {
+                        if need_sep {
+                            ui.separator();
+                        }
+                        ui.label(RichText::new(status).color(Color32::from_gray(160)));
+                    }
+                },
             );
         });
+}
+
+fn warning_chip_label(n: usize) -> String {
+    if n == 1 {
+        "1 warning".into()
+    } else {
+        format!("{n} warnings")
+    }
+}
+
+fn warning_chip(ui: &mut egui::Ui, n: usize, open: &mut bool) {
+    let text = RichText::new(warning_chip_label(n)).color(WARN_FG);
+    let resp = ui
+        .add(egui::Label::new(text).sense(Sense::click()))
+        .on_hover_text("Click to view");
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter().hline(
+            resp.rect.x_range(),
+            resp.rect.bottom() - 1.0,
+            Stroke::new(1.0_f32, WARN_FG),
+        );
+    }
+    if resp.clicked() {
+        *open = true;
+    }
 }
 
 fn help_row(ui: &mut egui::Ui, keys: &str, action: &str) {
@@ -433,8 +642,13 @@ fn paint_opening_overlay(ui: &mut egui::Ui, rect: egui::Rect, frac: f32, stage: 
 }
 
 const TITLE_H: f32 = 32.0;
+const STATUS_H: f32 = 22.0;
+const POPUP_HEADER_H: f32 = 24.0;
 const RESIZE_PAD: f32 = 5.0;
 const CAPTION_W: f32 = 46.0;
+const CHROME: Color32 = Color32::from_rgb(40, 40, 44);
+const CHROME_LINE: Color32 = Color32::from_gray(48);
+const WARN_FG: Color32 = Color32::from_rgb(220, 160, 80);
 
 fn title_bar(
     ctx: &egui::Context,
@@ -446,11 +660,16 @@ fn title_bar(
         .exact_height(TITLE_H)
         .frame(
             egui::Frame::NONE
-                .fill(Color32::from_rgb(22, 22, 24))
+                .fill(CHROME)
                 .inner_margin(egui::Margin::ZERO),
         )
         .show(ctx, |ui| {
             let bar = ui.max_rect();
+            ui.painter().hline(
+                bar.x_range(),
+                bar.bottom() - 0.5,
+                Stroke::new(1.0_f32, CHROME_LINE),
+            );
             let btn_band = bar.with_min_x(bar.right() - CAPTION_W * 3.0);
             let drag_rect = bar
                 .with_min_x(bar.left() + 300.0)
@@ -616,7 +835,7 @@ fn paint_caption_icon(
                 egui::vec2(s, s),
             );
             painter.rect_stroke(back, 0.0, stroke, egui::StrokeKind::Inside);
-            painter.rect_filled(front, 0.0, Color32::from_rgb(22, 22, 24));
+            painter.rect_filled(front, 0.0, CHROME);
             painter.rect_stroke(front, 0.0, stroke, egui::StrokeKind::Inside);
         }
         CaptionIcon::Close => {
@@ -707,10 +926,14 @@ impl eframe::App for MeshpadApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
             self.help_open = !self.help_open;
         }
-        if self.help_open
+        if (self.warnings_open || self.help_open)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            self.help_open = false;
+            if self.warnings_open {
+                self.warnings_open = false;
+            } else {
+                self.help_open = false;
+            }
         }
         if self.opening.is_none()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Y))
@@ -727,46 +950,20 @@ impl eframe::App for MeshpadApp {
             }
         }
         title_bar(ctx, &mut want_open, &mut self.help_open, &self.title_icon);
-
-        egui::TopBottomPanel::bottom("status")
-            .exact_height(22.0)
-            .frame(
-                egui::Frame::NONE
-                    .fill(Color32::from_rgb(18, 18, 20))
-                    .inner_margin(egui::Margin::symmetric(10, 0)),
-            )
-            .show(ctx, |ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    let mut need_sep = false;
-                    if let Some(name) = &self.title_file {
-                        ui.label(RichText::new(name).color(Color32::from_gray(200)));
-                        need_sep = true;
-                    }
-                    if self.camera.y_up {
-                        if need_sep {
-                            ui.separator();
-                        }
-                        ui.label(RichText::new("Y-up").color(Color32::from_gray(160)));
-                        need_sep = true;
-                    }
-                    if !self.status.is_empty() {
-                        if need_sep {
-                            ui.separator();
-                        }
-                        ui.label(RichText::new(&self.status).color(Color32::from_gray(160)));
-                        need_sep = true;
-                    }
-                    for w in &self.warnings {
-                        if need_sep {
-                            ui.separator();
-                        }
-                        ui.label(RichText::new(w).color(Color32::from_rgb(220, 160, 80)));
-                        need_sep = true;
-                    }
-                });
-            });
+        if self.warnings.is_empty() {
+            self.warnings_open = false;
+        }
+        status_bar(
+            ctx,
+            self.title_file.as_deref(),
+            self.camera.y_up,
+            &self.status,
+            &self.warnings,
+            &mut self.warnings_open,
+        );
 
         show_controls_help(ctx, &mut self.help_open);
+        show_warnings(ctx, &mut self.warnings_open, &self.warnings);
 
         if want_open {
             self.try_open_dialog(frame);
@@ -977,5 +1174,11 @@ mod tests {
         let screen = win();
         let pos = egui::pos2(400.0, 2.0);
         assert_eq!(resize_dir_at(screen, pos), Some(ResizeDirection::North));
+    }
+
+    #[test]
+    fn warning_chip_label_singular_and_plural() {
+        assert_eq!(warning_chip_label(1), "1 warning");
+        assert_eq!(warning_chip_label(2), "2 warnings");
     }
 }

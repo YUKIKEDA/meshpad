@@ -147,4 +147,48 @@ mod tests {
             assert_eq!(soup.triangle_count(), 2);
         });
     }
+
+    fn testdata(rel: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join(rel)
+    }
+
+    #[test]
+    fn testdata_warnings_many_is_a_long_list() {
+        let dir = testdata("warnings_many");
+        let (files, open_w) = crate::open::expand_open_inputs(&[dir]);
+        assert!(open_w.is_empty());
+        assert_eq!(files.len(), 12);
+        let (soup, warnings) = load_paths(&files).unwrap();
+        assert_eq!(soup.triangle_count(), 12);
+        assert_eq!(warnings.len(), 24);
+        assert!(warnings.iter().all(|w| w.contains("part_")));
+    }
+
+    #[test]
+    fn testdata_warnings_fail_is_an_error() {
+        let err = load_paths(&[testdata("warnings_fail.nas")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no surface triangles"));
+        assert!(err.contains("CORD2R"));
+    }
+
+    #[test]
+    fn testdata_long_path_keeps_prefix_on_warnings() {
+        let dir = testdata(
+            "long_path_this_directory_name_is_intentionally_verbose_to_wrap_warning_prefixes",
+        );
+        let (files, _) = crate::open::expand_open_inputs(&[dir]);
+        assert_eq!(files.len(), 1);
+        let (_, warnings) = load_paths(&files).unwrap();
+        assert!(!warnings.is_empty());
+        assert!(warnings.iter().all(|w| {
+            w.contains(
+                "long_path_this_directory_name_is_intentionally_verbose_to_wrap_warning_prefixes",
+            )
+        }));
+        assert!(warnings.iter().any(|w| w.len() > 120));
+    }
 }

@@ -12,6 +12,7 @@
 //! 引数なしなら空ウィンドウを出す。フォルダを渡せば直下のメッシュだけを載せる。
 
 #![warn(missing_docs)]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 use std::sync::Arc;
