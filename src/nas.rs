@@ -745,4 +745,45 @@ CQUAD4         1       1       1       2       3       4\n";
         assert!(w.is_empty());
         assert_eq!(mesh.positions.len() / 3, 2);
     }
+
+    #[test]
+    fn testdata_warnings_nas_has_diagnostics() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/warnings.nas");
+        let bytes = std::fs::read(&path).unwrap();
+        let (mesh, warnings) = parse_nas(&bytes).unwrap();
+        assert_eq!(mesh.positions.len(), 3);
+        assert!(warnings.iter().any(|w| w.contains("cp")));
+        assert!(warnings.iter().any(|w| w.contains("CORD2R")));
+    }
+
+    #[test]
+    fn testdata_warnings_long_covers_all_kinds() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/warnings_long.nas");
+        let bytes = std::fs::read(&path).unwrap();
+        let (mesh, warnings) = parse_nas(&bytes).unwrap();
+        assert_eq!(mesh.positions.len(), 3);
+        assert_eq!(warnings.len(), 3);
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("skipped GRID") && w.contains("30")));
+        assert!(warnings.iter().any(|w| w.contains("missing GRID")));
+        let unknown = warnings
+            .iter()
+            .find(|w| w.contains("unknown cards"))
+            .expect("unknown cards");
+        assert!(unknown.len() > 200);
+        assert!(unknown.matches(',').count() >= 20);
+    }
+
+    #[test]
+    fn testdata_warnings_fail_has_no_triangles() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/warnings_fail.nas");
+        let bytes = std::fs::read(&path).unwrap();
+        let err = parse_nas(&bytes).unwrap_err().to_string();
+        assert!(err.contains("no surface triangles"));
+        assert!(err.contains("cp != 0"));
+        assert!(err.contains("CORD2R"));
+    }
 }
